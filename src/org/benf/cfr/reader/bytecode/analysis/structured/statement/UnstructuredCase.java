@@ -27,14 +27,7 @@ public class UnstructuredCase extends AbstractUnStructuredStatement {
 
     @Override
     public Dumper dump(Dumper dumper) {
-        if (values.isEmpty()) {
-            dumper.print("** default:").newln();
-        } else {
-            for (Expression value : values) {
-                dumper.print("** case ").dump(value).print(":").newln();
-            }
-        }
-        return dumper;
+        return dumper.print("; /* CFR unstructured switch case */").newln();
     }
 
     @Override

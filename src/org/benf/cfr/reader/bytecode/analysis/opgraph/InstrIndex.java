@@ -26,7 +26,8 @@ public class InstrIndex implements Comparable<InstrIndex> {
     @Override
     public String toString() {
         int subidx = idx();
-        return "lbl" + index + (subidx == 0 ? "" : "." + subidx);
+        String label = index < 0 ? "lbl_neg" + -(long)index : "lbl" + index;
+        return label + (subidx == 0 ? "" : "." + subidx);
     }
 
     @Override

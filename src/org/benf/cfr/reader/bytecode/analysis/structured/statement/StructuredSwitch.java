@@ -18,6 +18,7 @@ import org.benf.cfr.reader.bytecode.analysis.structured.StructuredStatement;
 import org.benf.cfr.reader.state.TypeUsageCollector;
 import org.benf.cfr.reader.util.output.Dumper;
 
+import java.util.ArrayList;
 import java.util.List;
 
 public class StructuredSwitch extends AbstractStructuredBlockStatement implements BoxingProcessor {
@@ -56,8 +57,88 @@ public class StructuredSwitch extends AbstractStructuredBlockStatement implement
     public Dumper dump(Dumper dumper) {
         if (blockIdentifier.hasForeignReferences()) dumper.print(blockIdentifier.getName() + " : ");
         dumper.print("switch (").dump(switchOn).print(") ");
-        getBody().dump(dumper);
+        StructuredStatement body = getBody().getStatement();
+        if (body instanceof Block && canPromoteNestedCases((Block)body)) {
+            dumpSwitchBody(dumper, (Block)body);
+        } else {
+            getBody().dump(dumper);
+        }
         return dumper;
+    }
+
+    private boolean canPromoteNestedCases(Block switchBody) {
+        if (!switchBody.isIndenting() || switchBody.hasForeignReferences()) return false;
+        for (Op04StructuredStatement statement : switchBody.getBlockStatements()) {
+            StructuredStatement child = statement.getStatement();
+            if (child instanceof Block && canPromoteCases((Block)child)) return true;
+        }
+        return false;
+    }
+
+    private boolean canPromoteCases(Block block) {
+        if (!block.isIndenting() || block.hasForeignReferences()) return false;
+        for (Op04StructuredStatement statement : block.getBlockStatements()) {
+            if (statement.getStatement() instanceof StructuredCase) return true;
+        }
+        return false;
+    }
+
+    private void dumpSwitchBody(Dumper dumper, Block switchBody) {
+        dumper.separator("{").newln();
+        dumper.indent(1);
+        for (Op04StructuredStatement statement : switchBody.getBlockStatements()) {
+            StructuredStatement child = statement.getStatement();
+            if (child instanceof Block && canPromoteCases((Block)child)) {
+                dumpPromotedCases(dumper, (Block)child);
+            } else {
+                statement.dump(dumper);
+            }
+        }
+        dumper.indent(-1);
+        dumper.separator("}").newln();
+    }
+
+    /*
+     * A switch case can be left inside a synthetic block when control-flow joins
+     * have multiple incoming edges.  Java only permits case labels directly in
+     * the switch body, so move the label out and retain the block contents in a
+     * case-local scope.
+     */
+    private void dumpPromotedCases(Dumper dumper, Block block) {
+        List<Op04StructuredStatement> prefix = new ArrayList<Op04StructuredStatement>();
+        List<Op04StructuredStatement> caseBody = new ArrayList<Op04StructuredStatement>();
+        StructuredCase currentCase = null;
+        for (Op04StructuredStatement statement : block.getBlockStatements()) {
+            StructuredStatement child = statement.getStatement();
+            if (child instanceof StructuredCase) {
+                if (currentCase != null) {
+                    dumpPromotedCase(dumper, currentCase, prefix, caseBody);
+                    prefix.clear();
+                    caseBody.clear();
+                }
+                currentCase = (StructuredCase)child;
+            } else if (currentCase == null) {
+                prefix.add(statement);
+            } else {
+                caseBody.add(statement);
+            }
+        }
+        if (currentCase != null) {
+            dumpPromotedCase(dumper, currentCase, prefix, caseBody);
+        } else {
+            block.dump(dumper);
+        }
+    }
+
+    private void dumpPromotedCase(Dumper dumper, StructuredCase structuredCase, List<Op04StructuredStatement> prefix, List<Op04StructuredStatement> caseBody) {
+        structuredCase.dumpHeader(dumper);
+        dumper.separator("{").newln();
+        dumper.indent(1);
+        for (Op04StructuredStatement statement : prefix) statement.dump(dumper);
+        structuredCase.getBody().dump(dumper);
+        for (Op04StructuredStatement statement : caseBody) statement.dump(dumper);
+        dumper.indent(-1);
+        dumper.separator("}").newln();
     }
 
     @Override

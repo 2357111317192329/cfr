@@ -15,6 +15,7 @@ import org.benf.cfr.reader.entities.constantpool.*;
 import org.benf.cfr.reader.entities.exceptions.ExceptionCheck;
 import org.benf.cfr.reader.util.output.Dumper;
 import org.benf.cfr.reader.util.output.TypeContext;
+import org.benf.cfr.reader.util.output.StaticInitializerContext;
 
 public class StaticVariable extends AbstractFieldVariable {
 
@@ -68,7 +69,7 @@ public class StaticVariable extends AbstractFieldVariable {
 
     @Override
     public Dumper dumpInner(Dumper d) {
-        if (knownSimple) {
+        if (knownSimple || StaticInitializerContext.owns(getOwningClassType())) {
             return d.fieldName(getFieldName(), getOwningClassType(), false, true, false);
         } else {
             return d.dump(getOwningClassType(), TypeContext.Static).separator(".").fieldName(getFieldName(), getOwningClassType(), false, true, false);

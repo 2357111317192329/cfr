@@ -25,7 +25,7 @@ public class UnstructuredIter extends AbstractUnStructuredStatement {
 
     @Override
     public Dumper dump(Dumper dumper) {
-        return dumper.print("** for (").dump(iterator).print(" : ").dump(list).separator(")").newln();
+        return dumper.print("; /* CFR unstructured iterator loop */").newln();
     }
 
     @Override

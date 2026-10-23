@@ -2,6 +2,16 @@ package org.benf.cfr.reader.entities.attributes;
 
 import org.benf.cfr.reader.bytecode.CodeAnalyser;
 import org.benf.cfr.reader.bytecode.analysis.opgraph.Op04StructuredStatement;
+import org.benf.cfr.reader.bytecode.analysis.opgraph.op4rewriters.transformers.NumericTernaryLifter;
+import org.benf.cfr.reader.bytecode.analysis.opgraph.op4rewriters.transformers.StructuredStatementTransformer;
+import org.benf.cfr.reader.bytecode.analysis.structured.StructuredScope;
+import org.benf.cfr.reader.bytecode.analysis.structured.StructuredStatement;
+import org.benf.cfr.reader.bytecode.analysis.structured.statement.StructuredReturn;
+import org.benf.cfr.reader.bytecode.analysis.structured.statement.Block;
+import org.benf.cfr.reader.bytecode.analysis.structured.statement.StructuredBreak;
+import org.benf.cfr.reader.bytecode.analysis.structured.statement.StructuredContinue;
+import org.benf.cfr.reader.bytecode.analysis.structured.statement.UnstructuredContinue;
+import org.benf.cfr.reader.bytecode.analysis.parse.utils.BlockIdentifier;
 import org.benf.cfr.reader.entities.Method;
 import org.benf.cfr.reader.entities.constantpool.ConstantPool;
 import org.benf.cfr.reader.entities.exceptions.ExceptionTableEntry;
@@ -12,9 +22,13 @@ import org.benf.cfr.reader.util.ClassFileVersion;
 import org.benf.cfr.reader.util.ConfusedCFRException;
 import org.benf.cfr.reader.util.bytestream.ByteData;
 import org.benf.cfr.reader.util.output.Dumper;
+import org.benf.cfr.reader.util.output.StaticInitializerContext;
+import org.benf.cfr.reader.util.output.BlockReferenceContext;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.HashSet;
+import java.util.Set;
 
 public class AttributeCode extends Attribute {
     public static final String ATTRIBUTE_NAME = "Code";
@@ -31,6 +45,7 @@ public class AttributeCode extends Attribute {
     private final ByteData rawData;
 
     private final CodeAnalyser codeAnalyser;
+    private Method method;
 
     public AttributeCode(ByteData raw, final ConstantPool cp, ClassFileVersion classFileVersion) {
         this.cp = cp;
@@ -87,6 +102,7 @@ public class AttributeCode extends Attribute {
     }
 
     public void setMethod(Method method) {
+        this.method = method;
         codeAnalyser.setMethod(method);
     }
 
@@ -104,6 +120,10 @@ public class AttributeCode extends Attribute {
 
     public AttributeLineNumberTable getLineNumberTable() {
         return attributes.getByName(AttributeLineNumberTable.ATTRIBUTE_NAME);
+    }
+
+    public AttributeStackMapTable getStackMapTable() {
+        return attributes.getByName(AttributeStackMapTable.ATTRIBUTE_NAME);
     }
 
     public AttributeRuntimeVisibleTypeAnnotations getRuntimeVisibleTypeAnnotations() {
@@ -132,7 +152,52 @@ public class AttributeCode extends Attribute {
 
     @Override
     public Dumper dump(Dumper d) {
-        return codeAnalyser.getAnalysis(getConstantPool().getDCCommonState()).dump(d);
+        Op04StructuredStatement analysis = codeAnalyser.getAnalysis(getConstantPool().getDCCommonState());
+        new NumericTernaryLifter().transform(analysis);
+        boolean staticInitializer = method != null && method.getConstructorFlag() == Method.MethodConstructor.STATIC_CONSTRUCTOR;
+        if (!staticInitializer) return analysis.dump(d);
+
+        final List<StructuredStatement> statements = new ArrayList<StructuredStatement>();
+        analysis.transform(new StructuredStatementTransformer() {
+            @Override
+            public StructuredStatement transform(StructuredStatement in, StructuredScope scope) {
+                statements.add(in);
+                in.transformStructuredChildren(this, scope);
+                return in;
+            }
+        }, new StructuredScope());
+        boolean hasVoidReturn = false;
+        Set<BlockIdentifier> referencedBlocks = new HashSet<BlockIdentifier>();
+        Set<BlockIdentifier> continueTargets = new HashSet<BlockIdentifier>();
+        for (StructuredStatement statement : statements) {
+            if (statement instanceof StructuredReturn && ((StructuredReturn) statement).getValue() == null) {
+                hasVoidReturn = true;
+            } else if (statement instanceof StructuredBreak && !((StructuredBreak) statement).isLocalBreak()) {
+                referencedBlocks.add(((StructuredBreak) statement).getBreakBlock());
+            } else if (statement instanceof StructuredContinue && !((StructuredContinue) statement).isLocalContinue()) {
+                referencedBlocks.add(((StructuredContinue) statement).getContinueTgt());
+            } else if (statement instanceof UnstructuredContinue) {
+                referencedBlocks.add(((UnstructuredContinue) statement).getContinueTgt());
+            } else if (statement instanceof Block) {
+                BlockIdentifier block = ((Block) statement).getBlockIdentifier();
+                if (block != null && block.getBlockType().isLoop()) continueTargets.add(block);
+            }
+        }
+
+        try (BlockReferenceContext labels = BlockReferenceContext.enter(referencedBlocks, continueTargets)) {
+            if (!staticInitializer) return analysis.dump(d);
+            try (StaticInitializerContext ignored = StaticInitializerContext.enter(method.getClassFile().getClassType(), hasVoidReturn)) {
+                if (hasVoidReturn) {
+                    d.separator("{").newln().indent(1);
+                    d.print(StaticInitializerContext.EXIT_LABEL).print(": ");
+                    analysis.dump(d);
+                    d.indent(-1);
+                    d.separator("}").newln();
+                    return d;
+                }
+                return analysis.dump(d);
+            }
+        }
     }
 
     @Override

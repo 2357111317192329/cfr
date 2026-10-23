@@ -65,7 +65,7 @@ public class AttributeFactory {
             } else if (AttributeLocalVariableTypeTable.ATTRIBUTE_NAME.equals(attributeName)) {
                 return new AttributeLocalVariableTypeTable();
             } else if (AttributeStackMapTable.ATTRIBUTE_NAME.equals(attributeName)) {
-                return new AttributeStackMapTable(raw, cp);
+                return new AttributeStackMapTable(raw, cp, classFileVersion);
             } else if (AttributeSynthetic.ATTRIBUTE_NAME.equals(attributeName)) {
                 return new AttributeSynthetic();
             } else if (AttributeScalaSig.ATTRIBUTE_NAME.equals(attributeName)) {

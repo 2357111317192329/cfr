@@ -17,6 +17,7 @@ import org.benf.cfr.reader.bytecode.analysis.parse.utils.EquivalenceConstraint;
 import org.benf.cfr.reader.bytecode.analysis.parse.utils.LValueRewriter;
 import org.benf.cfr.reader.bytecode.analysis.parse.utils.LValueUsageCollector;
 import org.benf.cfr.reader.bytecode.analysis.parse.utils.SSAIdentifiers;
+import org.benf.cfr.reader.bytecode.analysis.types.JavaTypeInstance;
 import org.benf.cfr.reader.bytecode.analysis.types.RawJavaType;
 import org.benf.cfr.reader.bytecode.analysis.types.StackType;
 import org.benf.cfr.reader.bytecode.analysis.types.discovery.InferredJavaType;
@@ -36,15 +37,15 @@ public class ArithmeticOperation extends AbstractExpression implements BoxingPro
 
     public ArithmeticOperation(BytecodeLoc loc, Expression lhs, Expression rhs, ArithOp op) {
         super(loc, inferredType(lhs.getInferredJavaType(), rhs.getInferredJavaType(), op));
-        this.lhs = lhs;
-        this.rhs = rhs;
+        this.lhs = BooleanToNumericExpression.coerce(lhs, rhs.getInferredJavaType().getJavaTypeInstance());
+        this.rhs = BooleanToNumericExpression.coerce(rhs, lhs.getInferredJavaType().getJavaTypeInstance());
         this.op = op;
     }
 
     public ArithmeticOperation(BytecodeLoc loc, InferredJavaType knownType, Expression lhs, Expression rhs, ArithOp op) {
         super(loc, knownType);
-        this.lhs = lhs;
-        this.rhs = rhs;
+        this.lhs = BooleanToNumericExpression.coerce(lhs, rhs.getInferredJavaType().getJavaTypeInstance());
+        this.rhs = BooleanToNumericExpression.coerce(rhs, lhs.getInferredJavaType().getJavaTypeInstance());
         this.op = op;
     }
 
@@ -65,7 +66,13 @@ public class ArithmeticOperation extends AbstractExpression implements BoxingPro
     }
 
     private static InferredJavaType inferredType(InferredJavaType a, InferredJavaType b, ArithOp op) {
+        // Let the normal arithmetic inference promote ambiguous 0/1 literals before
+        // handling operands whose stack types cannot be reconciled there.
         InferredJavaType.useInArithOp(a, b, op);
+        RawJavaType aType = a.getRawType();
+        RawJavaType bType = b.getRawType();
+        if (aType == RawJavaType.BOOLEAN && bType.isNumber()) return new InferredJavaType(bType, InferredJavaType.Source.OPERATION);
+        if (bType == RawJavaType.BOOLEAN && aType.isNumber()) return new InferredJavaType(aType, InferredJavaType.Source.OPERATION);
         RawJavaType rawJavaType = a.getRawType();
         // We have to value convert.
 
@@ -90,9 +97,18 @@ public class ArithmeticOperation extends AbstractExpression implements BoxingPro
 
     @Override
     public Dumper dumpInner(Dumper d) {
-        lhs.dumpWithOuterPrecedence(d, getPrecedence(), Troolean.TRUE);
+        Expression displayLhs = lhs;
+        Expression displayRhs = rhs;
+        JavaTypeInstance lhsType = displayLhs.getInferredJavaType().getJavaTypeInstance();
+        JavaTypeInstance rhsType = displayRhs.getInferredJavaType().getJavaTypeInstance();
+        if (lhsType == RawJavaType.BOOLEAN && rhsType instanceof RawJavaType && ((RawJavaType) rhsType).isNumber()) {
+            displayLhs = BooleanToNumericExpression.coerce(displayLhs, rhsType);
+        } else if (rhsType == RawJavaType.BOOLEAN && lhsType instanceof RawJavaType && ((RawJavaType) lhsType).isNumber()) {
+            displayRhs = BooleanToNumericExpression.coerce(displayRhs, lhsType);
+        }
+        displayLhs.dumpWithOuterPrecedence(d, getPrecedence(), Troolean.TRUE);
         d.operator(" " + op.getShowAs() + " ");
-        rhs.dumpWithOuterPrecedence(d, getPrecedence(), Troolean.FALSE);
+        displayRhs.dumpWithOuterPrecedence(d, getPrecedence(), Troolean.FALSE);
         return d;
     }
 

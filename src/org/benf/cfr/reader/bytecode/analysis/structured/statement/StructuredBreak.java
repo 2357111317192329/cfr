@@ -6,6 +6,7 @@ import org.benf.cfr.reader.bytecode.analysis.opgraph.op4rewriters.matchutil.Matc
 import org.benf.cfr.reader.bytecode.analysis.opgraph.op4rewriters.matchutil.MatchResultCollector;
 import org.benf.cfr.reader.bytecode.analysis.parse.rewriters.ExpressionRewriter;
 import org.benf.cfr.reader.bytecode.analysis.parse.utils.BlockIdentifier;
+import org.benf.cfr.reader.bytecode.analysis.parse.utils.BlockType;
 import org.benf.cfr.reader.bytecode.analysis.parse.utils.Triplet;
 import org.benf.cfr.reader.bytecode.analysis.parse.utils.scope.LValueScopeDiscoverer;
 import org.benf.cfr.reader.bytecode.analysis.structured.StructuredScope;
@@ -110,6 +111,14 @@ public class StructuredBreak extends AbstractStructuredStatement {
                 Set<Op04StructuredStatement> localNext = local.getThird();
                 Set<Op04StructuredStatement> actualNext = scope.getThird();
                 if (localNext.containsAll(actualNext)) {
+                    // A local break is only java-legal out of a switch or a loop; otherwise
+                    // keep the labelled break (targetting the same block).
+                    BlockIdentifier localBlock = local.getSecond();
+                    boolean localLegal = localBlock.getBlockType() == BlockType.SWITCH ||
+                            localBlock.getBlockType().isLoop();
+                    if (!localLegal) {
+                        return this;
+                    }
                     breakBlock.releaseForeignRef();
                     return new StructuredBreak(getLoc(), local.getSecond(), true);
                 } else {

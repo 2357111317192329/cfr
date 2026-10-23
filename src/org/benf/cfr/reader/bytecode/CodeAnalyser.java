@@ -8,6 +8,8 @@ import org.benf.cfr.reader.bytecode.analysis.opgraph.Op02WithProcessedDataAndRef
 import org.benf.cfr.reader.bytecode.analysis.opgraph.Op03Blocks;
 import org.benf.cfr.reader.bytecode.analysis.opgraph.Op03SimpleStatement;
 import org.benf.cfr.reader.bytecode.analysis.opgraph.Op04StructuredStatement;
+import org.benf.cfr.reader.bytecode.analysis.opgraph.op4rewriters.transformers.ConstructorInitialiserHoister;
+import org.benf.cfr.reader.bytecode.analysis.opgraph.op4rewriters.transformers.StructuredStatementTransformer;
 import org.benf.cfr.reader.bytecode.analysis.opgraph.op02obf.Op02Obf;
 import org.benf.cfr.reader.bytecode.analysis.opgraph.op2rewriters.GetClassTestInnerConstructor;
 import org.benf.cfr.reader.bytecode.analysis.opgraph.op2rewriters.GetClassTestLambda;
@@ -49,11 +51,23 @@ import org.benf.cfr.reader.bytecode.analysis.parse.rewriters.StringBuilderRewrit
 import org.benf.cfr.reader.bytecode.analysis.parse.rewriters.XorRewriter;
 import org.benf.cfr.reader.bytecode.analysis.parse.utils.BlockIdentifierFactory;
 import org.benf.cfr.reader.bytecode.analysis.structured.statement.StructuredComment;
+import org.benf.cfr.reader.bytecode.analysis.structured.statement.Block;
+import org.benf.cfr.reader.bytecode.analysis.structured.statement.StructuredAssignment;
+import org.benf.cfr.reader.bytecode.analysis.structured.statement.StructuredLocalDeclaration;
+import org.benf.cfr.reader.bytecode.analysis.structured.statement.StructuredDefinition;
+import org.benf.cfr.reader.bytecode.analysis.structured.statement.StructuredCatch;
+import org.benf.cfr.reader.bytecode.analysis.structured.StructuredScope;
+import org.benf.cfr.reader.bytecode.analysis.parse.LValue;
+import org.benf.cfr.reader.bytecode.analysis.parse.lvalue.LocalVariable;
+import org.benf.cfr.reader.bytecode.analysis.types.JavaTypeInstance;
+import org.benf.cfr.reader.bytecode.analysis.types.RawJavaType;
+import org.benf.cfr.reader.bytecode.analysis.types.TypeConstants;
 import org.benf.cfr.reader.bytecode.analysis.variables.VariableFactory;
 import org.benf.cfr.reader.bytecode.opcode.JVMInstr;
 import org.benf.cfr.reader.entities.ClassFile;
 import org.benf.cfr.reader.entities.Method;
 import org.benf.cfr.reader.entities.attributes.AttributeCode;
+import org.benf.cfr.reader.entities.attributes.AttributeStackMapTable;
 import org.benf.cfr.reader.entities.constantpool.ConstantPool;
 import org.benf.cfr.reader.entities.exceptions.ExceptionAggregator;
 import org.benf.cfr.reader.entities.exceptions.ExceptionTableEntry;
@@ -73,8 +87,10 @@ import org.benf.cfr.reader.util.output.Dumper;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.SortedMap;
 import java.util.TreeMap;
 
@@ -813,7 +829,7 @@ public class CodeAnalyser {
          * at some form of obfuscation, or non java.  Either way, replace StackValues with locals
          * (albeit locals which known that they don't have a valid lookup).
          */
-        Op03Rewriters.replaceStackVarsWithLocals(op03SimpleParseNodes);
+        Op03Rewriters.replaceStackVarsWithLocals(op03SimpleParseNodes, variableFactory);
 
         /*
          * We might have eliminated temporaries which caused potential type clashes.
@@ -860,12 +876,14 @@ public class CodeAnalyser {
 
         Op04StructuredStatement.tidyEmptyCatch(block);
         Op04StructuredStatement.tidyTryCatch(block);
+        Op04StructuredStatement.tidyLooseCatches(block);
         Op04StructuredStatement.convertUnstructuredIf(block);
         Op04StructuredStatement.inlinePossibles(block);
         Op04StructuredStatement.removeStructuredGotos(block);
         Op04StructuredStatement.removePointlessBlocks(block);
         Op04StructuredStatement.removePointlessReturn(block);
         Op04StructuredStatement.removePointlessControlFlow(block);
+        Op04StructuredStatement.removeUnreachableStatements(block);
         Op04StructuredStatement.removePrimitiveDeconversion(options, method, block);
         if (options.getOption(OptionsImpl.LABELLED_BLOCKS)) {
             Op04StructuredStatement.insertLabelledBlocks(block);
@@ -881,6 +899,7 @@ public class CodeAnalyser {
 
         if (!block.isFullyStructured()) {
             comments.addComment(DecompilerComment.UNABLE_TO_STRUCTURE);
+            addFallbackLocalDeclarations(block, variableFactory, method);
         } else {
             Op04StructuredStatement.tidyTypedBooleans(block);
             Op04StructuredStatement.prettifyBadLoops(block);
@@ -978,6 +997,12 @@ public class CodeAnalyser {
             Op04StructuredStatement.applyTypeAnnotations(originalCodeAttribute, block, lutByOffset, comments);
         }
 
+        // Java mirrors a constructor's super()/this() initialiser on the first
+        // statement, even though the bytecode does not require this.
+        if (method.getConstructorFlag().isConstructor()) {
+            new ConstructorInitialiserHoister().hoist(block);
+        }
+
         // Only check for type clashes on first pass.
         if (passIdx == 0) {
             if (Op04StructuredStatement.checkTypeClashes(block, bytecodeMeta)) {
@@ -986,6 +1011,83 @@ public class CodeAnalyser {
         }
 
         return new AnalysisResultSuccessful(comments, block, anonymousClassUsage);
+    }
+
+    private static void addFallbackLocalDeclarations(Op04StructuredStatement block, VariableFactory variableFactory, Method method) {
+        if (!(block.getStatement() instanceof Block)) return;
+        List<LocalVariable> parameters = method.getMethodPrototype().getComputedParameters();
+        AttributeStackMapTable stackMapTable = method.getCodeAttribute().getStackMapTable();
+        List<JavaTypeInstance> initialLocals = method.getMethodPrototype().getInitialLocalTypes();
+        boolean enumConstructor = method.getConstructorFlag().isEnumConstructor();
+        int enumConstructorNameSlot = method.getMethodPrototype().isInstanceMethod() ? 1 : 0;
+        List<Op04StructuredStatement> declarations = new ArrayList<Op04StructuredStatement>();
+        Set<String> declaredNames = new HashSet<String>();
+        Set<LocalVariable> existingDeclarations = new HashSet<LocalVariable>();
+        final List<org.benf.cfr.reader.bytecode.analysis.structured.StructuredStatement> existingStatements = new ArrayList<org.benf.cfr.reader.bytecode.analysis.structured.StructuredStatement>();
+        block.transform(new StructuredStatementTransformer() {
+            @Override
+            public org.benf.cfr.reader.bytecode.analysis.structured.StructuredStatement transform(org.benf.cfr.reader.bytecode.analysis.structured.StructuredStatement in, StructuredScope scope) {
+                existingStatements.add(in);
+                in.transformStructuredChildren(this, scope);
+                return in;
+            }
+        }, new StructuredScope());
+        for (org.benf.cfr.reader.bytecode.analysis.structured.StructuredStatement statement : existingStatements) {
+            LocalVariable declared = null;
+            if (statement instanceof StructuredDefinition && ((StructuredDefinition) statement).getLvalue() instanceof LocalVariable) {
+                declared = (LocalVariable) ((StructuredDefinition) statement).getLvalue();
+            } else if (statement instanceof StructuredLocalDeclaration) {
+                declared = ((StructuredLocalDeclaration) statement).getLocalVariable();
+            } else if (statement instanceof StructuredCatch && ((StructuredCatch) statement).getCatching() instanceof LocalVariable) {
+                declared = (LocalVariable) ((StructuredCatch) statement).getCatching();
+            }
+            if (declared != null) {
+                existingDeclarations.add(declared);
+                declaredNames.add(declared.getName().getStringName());
+            }
+        }
+        for (LocalVariable parameter : parameters) {
+            String name = parameter.getName().getStringName();
+            if (!declaredNames.add(name)) {
+                variableFactory.mutatingRenameUnClash(parameter);
+                declaredNames.add(parameter.getName().getStringName());
+            }
+        }
+        for (LValue value : variableFactory.getCreatedVariables()) {
+            if (!(value instanceof LocalVariable)) continue;
+            LocalVariable local = (LocalVariable)value;
+            if (local.isFakeIgnored() || parameters.contains(local)) continue;
+            if (existingDeclarations.contains(local)) continue;
+            if (method.getMethodPrototype().isInstanceMethod() && local.getIdx() == 0) continue;
+            if (enumConstructor && (local.getIdx() == enumConstructorNameSlot || local.getIdx() == enumConstructorNameSlot + 1)) continue;
+            String name = local.getName().getStringName();
+            if (!declaredNames.add(name)) {
+                variableFactory.mutatingRenameUnClash(local);
+                declaredNames.add(local.getName().getStringName());
+            }
+            JavaTypeInstance type = local.getInferredJavaType().getJavaTypeInstance();
+            JavaTypeInstance stackMapType = stackMapTable == null ? null : stackMapTable.getLocalTypeAt(local.getIdx(), local.getOriginalRawOffset(), initialLocals);
+            boolean unresolvedType = type == RawJavaType.VOID || type == RawJavaType.REF || type == RawJavaType.RETURNADDRESS || type == RawJavaType.RETURNADDRESSORREF || type == RawJavaType.NULL;
+            if (stackMapType != null && (unresolvedType || (TypeConstants.OBJECT.equals(type) && !TypeConstants.OBJECT.equals(stackMapType)))) {
+                type = stackMapType;
+                local.getInferredJavaType().forceType(type, true);
+            }
+            if (type == RawJavaType.VOID || type == RawJavaType.REF || type == RawJavaType.RETURNADDRESS || type == RawJavaType.RETURNADDRESSORREF || type == RawJavaType.NULL) {
+                type = TypeConstants.OBJECT;
+                local.getInferredJavaType().forceType(type, true);
+            }
+            declarations.add(new Op04StructuredStatement(new StructuredLocalDeclaration(local)));
+        }
+        Block body = (Block)block.getStatement();
+        int insertionIndex = 0;
+        if (method.getMethodPrototype().isInstanceMethod() && !body.getBlockStatements().isEmpty()) {
+            org.benf.cfr.reader.bytecode.analysis.structured.StructuredStatement first = body.getBlockStatements().get(0).getStatement();
+            if (first instanceof org.benf.cfr.reader.bytecode.analysis.structured.statement.StructuredExpressionStatement) {
+                org.benf.cfr.reader.bytecode.analysis.parse.Expression expression = ((org.benf.cfr.reader.bytecode.analysis.structured.statement.StructuredExpressionStatement) first).getExpression();
+                if (expression instanceof org.benf.cfr.reader.bytecode.analysis.parse.expression.SuperFunctionInvokation) insertionIndex = 1;
+            }
+        }
+        body.getBlockStatements().addAll(insertionIndex, declarations);
     }
 
     private void generateUnverifiable(int x, List<Op01WithProcessedDataAndByteJumps> op1list, List<Op02WithProcessedDataAndRefs> op2list, Map<Integer, Integer> lutByIdx, SortedMap<Integer, Integer> lutByOffset, BytecodeLocFactory locFactory) {

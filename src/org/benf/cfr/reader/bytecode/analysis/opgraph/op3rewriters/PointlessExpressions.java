@@ -6,6 +6,7 @@ import org.benf.cfr.reader.bytecode.analysis.parse.LValue;
 import org.benf.cfr.reader.bytecode.analysis.parse.expression.LValueExpression;
 import org.benf.cfr.reader.bytecode.analysis.parse.expression.Literal;
 import org.benf.cfr.reader.bytecode.analysis.parse.expression.StackValue;
+import org.benf.cfr.reader.bytecode.analysis.parse.expression.CastExpression;
 import org.benf.cfr.reader.bytecode.analysis.parse.lvalue.FieldVariable;
 import org.benf.cfr.reader.bytecode.analysis.parse.lvalue.StaticVariable;
 import org.benf.cfr.reader.bytecode.analysis.parse.statement.AssignmentSimple;
@@ -34,12 +35,15 @@ public class PointlessExpressions {
             LValue lValue = assignmentSimple.getCreatedLValue();
             if (lValue instanceof FieldVariable) continue;
             Expression rValue = assignmentSimple.getRValue();
-            if (rValue.getClass() == LValueExpression.class) {
-                LValueExpression lValueExpression = (LValueExpression) rValue;
-                LValue lFromR = lValueExpression.getLValue();
-                if (lFromR.equals(lValue)) {
-                    ass.nopOut();
-                }
+            while (rValue instanceof CastExpression) rValue = ((CastExpression)rValue).getChild();
+            LValue source = null;
+            if (rValue instanceof LValueExpression) {
+                source = ((LValueExpression)rValue).getLValue();
+            } else if (rValue instanceof StackValue) {
+                source = ((StackValue)rValue).getStackValue();
+            }
+            if (source != null && source.equals(lValue)) {
+                ass.nopOut();
             }
         }
     }

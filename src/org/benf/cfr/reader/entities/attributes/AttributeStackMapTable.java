@@ -1,6 +1,9 @@
 package org.benf.cfr.reader.entities.attributes;
 
 import org.benf.cfr.reader.entities.constantpool.ConstantPool;
+import org.benf.cfr.reader.bytecode.analysis.types.JavaTypeInstance;
+import org.benf.cfr.reader.bytecode.analysis.types.RawJavaType;
+import org.benf.cfr.reader.bytecode.analysis.types.TypeConstants;
 import org.benf.cfr.reader.util.ClassFileVersion;
 import org.benf.cfr.reader.util.collections.ListFactory;
 import org.benf.cfr.reader.util.bytestream.ByteData;
@@ -8,6 +11,8 @@ import org.benf.cfr.reader.util.bytestream.OffsettingByteData;
 import org.benf.cfr.reader.util.output.Dumper;
 
 import java.util.List;
+import java.util.Map;
+import java.util.HashMap;
 
 /*
  * https://docs.oracle.com/javase/specs/jvms/se7/html/jvms-4.html#jvms-4.7.4
@@ -44,17 +49,22 @@ public class AttributeStackMapTable extends Attribute {
 
     private final boolean valid; // apparently, anyway!
     private final List<StackMapFrame> stackMapFrames;
+    private final ConstantPool cp;
+    private final boolean trustedForInference;
 
     public AttributeStackMapTable(ByteData raw, ConstantPool cp) {
+        this.cp = cp;
+        this.trustedForInference = false;
         this.valid = false;
         this.stackMapFrames = null;
     }
 
     /*
-     * NB : Currently unused - until I actually make use of this, doesn't seem worth consuming the
-     * memory.
+     * Keep the decoded frames so they can provide local-variable type hints during fallback output.
      */
     public AttributeStackMapTable(ByteData raw, ConstantPool cp, ClassFileVersion classFileVersion) {
+        this.cp = cp;
+        this.trustedForInference = classFileVersion.equalOrLater(ClassFileVersion.JAVA_6);
         int numEntries = raw.getU2At(OFFSET_OF_NUMBER_OF_ENTRIES);
         long offset = OFFSET_OF_STACK_MAP_FRAMES;
         List<StackMapFrame> frames = ListFactory.newList();
@@ -78,6 +88,88 @@ public class AttributeStackMapTable extends Attribute {
 
     public List<StackMapFrame> getStackMapFrames() {
         return stackMapFrames;
+    }
+
+    public Map<Integer, JavaTypeInstance> getLocalTypes(List<JavaTypeInstance> initialLocals) {
+        Map<Integer, JavaTypeInstance> res = new HashMap<Integer, JavaTypeInstance>();
+        if (!trustedForInference || !valid || stackMapFrames == null) return res;
+        List<JavaTypeInstance> locals = new java.util.ArrayList<JavaTypeInstance>(initialLocals);
+        for (StackMapFrame frame : stackMapFrames) {
+            if (frame instanceof StackMapFrameChopFrame) {
+                int count = 251 - ((StackMapFrameChopFrame)frame).frame_type;
+                for (int i = 0; i < count && !locals.isEmpty(); ++i) locals.remove(locals.size() - 1);
+            } else if (frame instanceof StackMapFrameAppendFrame) {
+                VerificationInfo[] appended = ((StackMapFrameAppendFrame)frame).verificationInfos;
+                for (VerificationInfo info : appended) locals.add(getVerificationType(info));
+            } else if (frame instanceof StackMapFrameFullFrame) {
+                VerificationInfo[] frameLocals = ((StackMapFrameFullFrame)frame).verificationLocals;
+                locals.clear();
+                for (VerificationInfo info : frameLocals) locals.add(getVerificationType(info));
+            }
+            int slot = 0;
+            for (JavaTypeInstance type : locals) {
+                if (type != null) {
+                    JavaTypeInstance previous = res.get(slot);
+                    if (previous == null) res.put(slot, type);
+                    else if (!previous.equals(type)) res.put(slot, TypeConstants.OBJECT);
+                }
+                slot += type == RawJavaType.LONG || type == RawJavaType.DOUBLE ? 2 : 1;
+            }
+        }
+        return res;
+    }
+
+    public JavaTypeInstance getLocalTypeAt(int requestedSlot, int bytecodeOffset, List<JavaTypeInstance> initialLocals) {
+        if (!trustedForInference || !valid || stackMapFrames == null || requestedSlot < 0) return null;
+        List<JavaTypeInstance> locals = new java.util.ArrayList<JavaTypeInstance>(initialLocals);
+        int frameOffset = -1;
+        for (StackMapFrame frame : stackMapFrames) {
+            frameOffset += getOffsetDelta(frame) + 1;
+            if (frameOffset > bytecodeOffset) break;
+            if (frame instanceof StackMapFrameChopFrame) {
+                int count = 251 - ((StackMapFrameChopFrame)frame).frame_type;
+                for (int i = 0; i < count && !locals.isEmpty(); ++i) locals.remove(locals.size() - 1);
+            } else if (frame instanceof StackMapFrameAppendFrame) {
+                VerificationInfo[] appended = ((StackMapFrameAppendFrame)frame).verificationInfos;
+                for (VerificationInfo info : appended) locals.add(getVerificationType(info));
+            } else if (frame instanceof StackMapFrameFullFrame) {
+                VerificationInfo[] frameLocals = ((StackMapFrameFullFrame)frame).verificationLocals;
+                locals.clear();
+                for (VerificationInfo info : frameLocals) locals.add(getVerificationType(info));
+            }
+        }
+        int slot = 0;
+        for (JavaTypeInstance type : locals) {
+            if (slot == requestedSlot) return type;
+            slot += type == RawJavaType.LONG || type == RawJavaType.DOUBLE ? 2 : 1;
+        }
+        return null;
+    }
+
+    private static int getOffsetDelta(StackMapFrame frame) {
+        if (frame instanceof StackMapFrameSameFrame) return ((StackMapFrameSameFrame)frame).id;
+        if (frame instanceof StackMapFrameSameLocals1SameItemFrame) return ((StackMapFrameSameLocals1SameItemFrame)frame).id - 64;
+        if (frame instanceof StackMapFrameSameLocals1SameItemFrameExtended) return ((StackMapFrameSameLocals1SameItemFrameExtended)frame).offset_delta;
+        if (frame instanceof StackMapFrameChopFrame) return ((StackMapFrameChopFrame)frame).offset_delta;
+        if (frame instanceof StackMapFrameSameFrameExtended) return ((StackMapFrameSameFrameExtended)frame).offset_delta;
+        if (frame instanceof StackMapFrameAppendFrame) return ((StackMapFrameAppendFrame)frame).offset_delta;
+        if (frame instanceof StackMapFrameFullFrame) return ((StackMapFrameFullFrame)frame).offset_delta;
+        throw new IllegalStateException("Unknown StackMapTable frame");
+    }
+
+    private JavaTypeInstance getVerificationType(VerificationInfo info) {
+        if (info == VerificationInfoTop.INSTANCE) return null;
+        if (info == VerificationInfoInteger.INSTANCE) return RawJavaType.INT;
+        if (info == VerificationInfoFloat.INSTANCE) return RawJavaType.FLOAT;
+        if (info == VerificationInfoLong.INSTANCE) return RawJavaType.LONG;
+        if (info == VerificationInfoDouble.INSTANCE) return RawJavaType.DOUBLE;
+        if (info instanceof VerificationInfoObject) {
+            return cp.getClassEntry(((VerificationInfoObject)info).cpool_index).getTypeInstance();
+        }
+        if (info == VerificationInfoNull.INSTANCE || info == VerificationInfoUninitializedThis.INSTANCE || info instanceof VerificationInfoUninitialized) {
+            return TypeConstants.OBJECT;
+        }
+        return null;
     }
 
     private static StackMapFrame readStackMapFrame(OffsettingByteData raw) {

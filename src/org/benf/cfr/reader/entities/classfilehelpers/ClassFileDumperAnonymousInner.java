@@ -25,6 +25,10 @@ public class ClassFileDumperAnonymousInner extends AbstractClassFileDumper {
     }
 
     public Dumper dumpWithArgs(ClassFile classFile, MethodPrototype usedMethod, List<Expression> args, boolean isEnum, Dumper d) {
+        return dumpWithArgs(classFile, usedMethod, args, isEnum, null, d);
+    }
+
+    public Dumper dumpWithArgs(ClassFile classFile, MethodPrototype usedMethod, List<Expression> args, boolean isEnum, ClassFile enumClass, Dumper d) {
 
         if (classFile == null) {
             d.print("/* Unavailable Anonymous Inner Class!! */");
@@ -69,7 +73,12 @@ public class ClassFileDumperAnonymousInner extends AbstractClassFileDumper {
         List<Method> methods = classFile.getMethods();
         if (!methods.isEmpty()) {
             for (Method method : methods) {
-                if (method.hiddenState() != Method.Visibility.Visible) continue;
+                // Enum constant-specific subclasses can implement abstract enum methods
+                // with synthetic bridge methods.  Emit only bridges that directly
+                // implement an abstract method on the enum; other bridges are recreated
+                // by the Java compiler from the source-level method.
+                if (method.hiddenState() != Method.Visibility.Visible &&
+                        !(isEnum && enumClass != null && isEnumAbstractImplementation(method, enumClass))) continue;
                 // Constructors on anonymous inners don't have arguments.
                 // (the initializer block ends up getting dumped into the first constructor).
                 if (method.isConstructor()) {
@@ -96,6 +105,21 @@ public class ClassFileDumperAnonymousInner extends AbstractClassFileDumper {
         d.print("}").newln();
 
         return d;
+    }
+
+    private boolean isEnumAbstractImplementation(Method method, ClassFile enumClass) {
+        if (!method.testAccessFlag(AccessFlagMethod.ACC_BRIDGE)) return false;
+        MethodPrototype implementation = method.getMethodPrototype();
+        for (Method enumMethod : enumClass.getMethods()) {
+            if (!enumMethod.testAccessFlag(AccessFlagMethod.ACC_ABSTRACT)) continue;
+            MethodPrototype abstractMethod = enumMethod.getMethodPrototype();
+            if (implementation.getName().equals(abstractMethod.getName()) &&
+                    implementation.getReturnType().equals(abstractMethod.getReturnType()) &&
+                    implementation.getArgs().equals(abstractMethod.getArgs())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     @Override

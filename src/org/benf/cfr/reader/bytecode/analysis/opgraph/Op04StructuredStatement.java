@@ -555,6 +555,58 @@ public class Op04StructuredStatement implements MutableGraph<Op04StructuredState
         }
     }
 
+    /*
+     * combineTryCatch can only pair a try with a catch that lives in the same Block.  When the obfuscated
+     * code has an exception handler structured into an enclosing block (so that the try's block is nested
+     * elsewhere), the catch is left 'loose' - a StructuredCatch with no enclosing StructuredTry.  Such a
+     * catch doesn't compile (and would previously have been inlined away, discarding the try entirely).
+     *
+     * Move any such loose catch to the try it belongs to (matched by block identifier), provided that try
+     * doesn't already have a catch or finally.  This is semantically better, and at minimum keeps the
+     * output compilable.
+     */
+    private static class LooseCatchMover implements StructuredStatementTransformer {
+        private final Map<BlockIdentifier, StructuredTry> tries = MapFactory.newMap();
+        private final Set<StructuredCatch> claimed = SetFactory.newIdentitySet();
+        private final List<StructuredCatch> loose = ListFactory.newList();
+
+        @Override
+        public StructuredStatement transform(StructuredStatement in, StructuredScope scope) {
+            if (in instanceof StructuredTry) {
+                StructuredTry structuredTry = (StructuredTry) in;
+                if (structuredTry.getTryBlockIdentifier() != null) {
+                    tries.put(structuredTry.getTryBlockIdentifier(), structuredTry);
+                }
+                for (Op04StructuredStatement catchBlock : structuredTry.getCatchBlocks()) {
+                    if (catchBlock.getStatement() instanceof StructuredCatch) {
+                        claimed.add((StructuredCatch) catchBlock.getStatement());
+                    }
+                }
+            } else if (in instanceof StructuredCatch) {
+                if (!claimed.contains(in)) {
+                    loose.add((StructuredCatch) in);
+                }
+            }
+            in.transformStructuredChildren(this, scope);
+            return in;
+        }
+
+        private void finish() {
+            for (StructuredCatch catchStatement : loose) {
+                Set<BlockIdentifier> possible = catchStatement.getPossibleTryBlocks();
+                if (possible == null) continue;
+                for (BlockIdentifier blockIdentifier : possible) {
+                    StructuredTry structuredTry = tries.get(blockIdentifier);
+                    if (structuredTry == null || structuredTry.hasCatchOrFinally()) continue;
+                    Op04StructuredStatement container = catchStatement.getContainer();
+                    if (container == null) break;
+                    structuredTry.addCatch(container.nopThisAndReplace());
+                    break;
+                }
+            }
+        }
+    }
+
     private static class Inliner implements StructuredStatementTransformer {
         @Override
         public StructuredStatement transform(StructuredStatement in, StructuredScope scope) {
@@ -603,7 +655,12 @@ public class Op04StructuredStatement implements MutableGraph<Op04StructuredState
             // Ok - it doesn't.  But can we get there by breaking out of one of the enclosing blocks?
             Triplet<StructuredStatement, BlockIdentifier, Set<Op04StructuredStatement>> breakTarget = breaktargets.peek();
             if (breakTarget.getThird().contains(target)) {
-                return new StructuredBreak(BytecodeLoc.TODO, breakTarget.getSecond(), true);
+                BlockIdentifier breakBlock = breakTarget.getSecond();
+                // A local break is only java-legal out of a switch, or a loop.  For anonymous
+                // blocks (and other non-local break targets) we need to keep the label.
+                boolean localLegal = breakBlock.getBlockType() == BlockType.SWITCH ||
+                        breakBlock.getBlockType().isLoop();
+                return new StructuredBreak(BytecodeLoc.TODO, breakBlock, localLegal);
             }
         }
         return stm;
@@ -709,6 +766,12 @@ public class Op04StructuredStatement implements MutableGraph<Op04StructuredState
         root.transform(new TryCatchTidier(), new StructuredScope());
     }
 
+    public static void tidyLooseCatches(Op04StructuredStatement root) {
+        LooseCatchMover mover = new LooseCatchMover();
+        root.transform(mover, new StructuredScope());
+        mover.finish();
+    }
+
     public static void inlinePossibles(Op04StructuredStatement root) {
         root.transform(new Inliner(), new StructuredScope());
     }
@@ -764,6 +827,10 @@ public class Op04StructuredStatement implements MutableGraph<Op04StructuredState
         new ControlFlowCleaningTransformer().transform(root);
     }
 
+    public static void removeUnreachableStatements(Op04StructuredStatement root) {
+        new UnreachableStatementRemover().transform(root);
+    }
+
     public static void tidyTypedBooleans(Op04StructuredStatement root) {
         new TypedBooleanTidier().transform(root);
     }
@@ -773,6 +840,7 @@ public class Op04StructuredStatement implements MutableGraph<Op04StructuredState
         new LambdaCleaner().transform(root);
         new TernaryCastCleaner().transform(root);
         new InvalidBooleanCastCleaner().transform(root);
+        new NumericTernaryLifter().transform(root);
         new HexLiteralTidier().transform(root);
         new ExpressionRewriterTransformer(LiteralRewriter.INSTANCE).transform(root);
         new InvalidExpressionStatementCleaner(variableFactory).transform(root);

@@ -24,7 +24,7 @@ public class UnstructuredAnonymousBreak extends AbstractUnStructuredStatement {
 
     @Override
     public Dumper dump(Dumper dumper) {
-        return dumper.print("** break ").print(blockEnding.getName()).newln();
+        return dumper.print("; /* CFR unstructured break: ").print(blockEnding.getName()).print(" */").newln();
     }
 
     @Override

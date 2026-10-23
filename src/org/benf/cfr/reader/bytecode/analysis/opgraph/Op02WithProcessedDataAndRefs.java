@@ -409,6 +409,15 @@ public class Op02WithProcessedDataAndRefs implements Dumpable, Graph<Op02WithPro
         switch (dynamicInvokeType) {
             case UNKNOWN:
             case BOOTSTRAP: {
+                if (dynamicInvokeType == DynamicInvokeType.UNKNOWN) {
+                    comments.addComment(DecompilerComment.UNRESOLVED_INVOKEDYNAMIC);
+                }
+                if (dynamicInvokeType == DynamicInvokeType.UNKNOWN && !stackProduced.isEmpty()) {
+                    List<Expression> dynamicArgs = getNStackRValuesAsExpressions(stackConsumed.size());
+                    List<JavaTypeInstance> typeArgs = dynamicPrototype.getArgs();
+                    if (typeArgs.size() == dynamicArgs.size()) dynamicPrototype.tightenArgs(null, dynamicArgs);
+                    return new AssignmentSimple(loc, getStackLValue(0), getDefaultDynamicValue(dynamicPrototype.getReturnType()));
+                }
                 callargs = buildInvokeBootstrapArgs(prototype, dynamicPrototype, bootstrapBehaviour, bootstrapMethodInfo, methodRef, showBoilerArgs, classFile, dcCommonState, comments);
                 List<Expression> dynamicArgs = getNStackRValuesAsExpressions(stackConsumed.size());
                 if (dynamicInvokeType == DynamicInvokeType.UNKNOWN) {
@@ -488,6 +497,19 @@ public class Op02WithProcessedDataAndRefs implements Dumpable, Graph<Op02WithPro
         } else {
             return new AssignmentSimple(loc, getStackLValue(0), funcCall);
         }
+    }
+
+    private Expression getDefaultDynamicValue(JavaTypeInstance type) {
+        if (type == RawJavaType.BOOLEAN) return new Literal(TypedLiteral.getBoolean(0));
+        if (type == RawJavaType.BYTE) return new Literal(TypedLiteral.getInt(0, RawJavaType.BYTE));
+        if (type == RawJavaType.CHAR) return new Literal(TypedLiteral.getChar(0));
+        if (type == RawJavaType.SHORT) return new Literal(TypedLiteral.getShort(0));
+        if (type == RawJavaType.INT) return new Literal(TypedLiteral.getInt(0));
+        if (type == RawJavaType.LONG) return new Literal(TypedLiteral.getLong(0));
+        if (type == RawJavaType.FLOAT) return new Literal(TypedLiteral.getFloat(0));
+        if (type == RawJavaType.DOUBLE) return new Literal(TypedLiteral.getDouble(0));
+        InferredJavaType inferred = new InferredJavaType(type, InferredJavaType.Source.BOOTSTRAP);
+        return new CastExpression(loc, inferred, new Literal(TypedLiteral.getNull()));
     }
 
     private JavaTypeInstance determineDynamicGeneric(final JavaTypeInstance callsiteReturn, MethodPrototype proto, Expression instantiated, DCCommonState dcCommonState) {

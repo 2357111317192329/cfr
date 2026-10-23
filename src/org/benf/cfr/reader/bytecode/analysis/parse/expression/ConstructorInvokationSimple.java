@@ -143,4 +143,8 @@ public class ConstructorInvokationSimple extends AbstractConstructorInvokation i
     public MethodPrototype getConstructorPrototype() {
         return getMethodPrototype();
     }
+
+    public JavaTypeInstance getConstructionType() {
+        return constructionType.getJavaTypeInstance();
+    }
 }

@@ -8,6 +8,7 @@ import org.benf.cfr.reader.bytecode.analysis.parse.expression.LValueExpression;
 import org.benf.cfr.reader.bytecode.analysis.parse.expression.StackValue;
 import org.benf.cfr.reader.bytecode.analysis.parse.lvalue.LocalVariable;
 import org.benf.cfr.reader.bytecode.analysis.parse.lvalue.StackSSALabel;
+import org.benf.cfr.reader.bytecode.analysis.variables.VariableFactory;
 import org.benf.cfr.reader.bytecode.analysis.parse.utils.SSAIdentifiers;
 import org.benf.cfr.reader.util.collections.MapFactory;
 
@@ -17,6 +18,12 @@ public class StackVarToLocalRewriter implements ExpressionRewriter {
 
     private final Map<StackSSALabel, LocalVariable> replacements = MapFactory.newMap();
     private int idx = 0;
+
+    private final VariableFactory variableFactory;
+
+    public StackVarToLocalRewriter(VariableFactory variableFactory) {
+        this.variableFactory = variableFactory;
+    }
 
     public void handleStatement(StatementContainer statementContainer) {
 
@@ -63,6 +70,7 @@ public class StackVarToLocalRewriter implements ExpressionRewriter {
         if (res != null) return res;
         res = new LocalVariable("v" + idx++, stackSSALabel.getInferredJavaType());
         replacements.put(stackSSALabel, res);
+        variableFactory.registerVariable(res);
         return res;
     }
 }

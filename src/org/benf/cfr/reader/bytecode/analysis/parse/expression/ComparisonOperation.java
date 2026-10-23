@@ -42,6 +42,13 @@ public class ComparisonOperation extends AbstractExpression implements Condition
         this.canNegate = canNegate;
         this.lhs = lhs;
         this.rhs = rhs;
+        JavaTypeInstance lhsType = lhs.getInferredJavaType().getJavaTypeInstance();
+        JavaTypeInstance rhsType = rhs.getInferredJavaType().getJavaTypeInstance();
+        if (lhsType == RawJavaType.BOOLEAN && rhsType instanceof RawJavaType && ((RawJavaType) rhsType).isNumber()) {
+            this.lhs = BooleanToNumericExpression.coerce(lhs, rhsType);
+        } else if (rhsType == RawJavaType.BOOLEAN && lhsType instanceof RawJavaType && ((RawJavaType) lhsType).isNumber()) {
+            this.rhs = BooleanToNumericExpression.coerce(rhs, lhsType);
+        }
         /*
          * RE: Integral types.
          *
@@ -69,10 +76,10 @@ public class ComparisonOperation extends AbstractExpression implements Condition
          * If both have derived their typing from literals (i.e. TypeTest10), we can't decide purely from typing
          * which is the 'better' type.  In this case, make use of additional hints.
          */
-        boolean lLiteral = lhs instanceof Literal;
-        boolean rLiteral = rhs instanceof Literal;
+        boolean lLiteral = this.lhs instanceof Literal;
+        boolean rLiteral = this.rhs instanceof Literal;
 
-        InferredJavaType.compareAsWithoutCasting(lhs.getInferredJavaType(), rhs.getInferredJavaType(), lLiteral, rLiteral);
+        InferredJavaType.compareAsWithoutCasting(this.lhs.getInferredJavaType(), this.rhs.getInferredJavaType(), lLiteral, rLiteral);
         this.op = op;
     }
 
@@ -104,9 +111,18 @@ public class ComparisonOperation extends AbstractExpression implements Condition
 
     @Override
     public Dumper dumpInner(Dumper d) {
-        lhs.dumpWithOuterPrecedence(d, getPrecedence(), Troolean.TRUE);
+        Expression displayLhs = lhs;
+        Expression displayRhs = rhs;
+        JavaTypeInstance lhsType = displayLhs.getInferredJavaType().getJavaTypeInstance();
+        JavaTypeInstance rhsType = displayRhs.getInferredJavaType().getJavaTypeInstance();
+        if (lhsType == RawJavaType.BOOLEAN && rhsType instanceof RawJavaType && ((RawJavaType) rhsType).isNumber()) {
+            displayLhs = BooleanToNumericExpression.coerce(displayLhs, rhsType);
+        } else if (rhsType == RawJavaType.BOOLEAN && lhsType instanceof RawJavaType && ((RawJavaType) lhsType).isNumber()) {
+            displayRhs = BooleanToNumericExpression.coerce(displayRhs, lhsType);
+        }
+        displayLhs.dumpWithOuterPrecedence(d, getPrecedence(), Troolean.TRUE);
         d.print(" ").operator(op.getShowAs()).print(" ");
-        rhs.dumpWithOuterPrecedence(d, getPrecedence(), Troolean.FALSE);
+        displayRhs.dumpWithOuterPrecedence(d, getPrecedence(), Troolean.FALSE);
         return d;
     }
 

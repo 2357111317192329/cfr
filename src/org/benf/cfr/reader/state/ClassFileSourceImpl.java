@@ -24,6 +24,9 @@ import java.io.InputStreamReader;
 import java.lang.reflect.Method;
 import java.net.URL;
 import java.net.URLConnection;
+import java.nio.file.DirectoryStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.*;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
@@ -107,7 +110,7 @@ public class ClassFileSourceImpl implements ClassFileSource2 {
             boolean forceJar = jarEntry != null && explicitJars.contains(jarEntry.getPath());
             File file = forceJar ? null : new File(usePath);
             byte[] content;
-            if (file != null && file.exists()) {
+            if (file != null && file.exists() && hasExactPathCase(file)) {
                 is = new FileInputStream(file);
                 length = file.length();
                 content = getBytesFromFile(is, length);
@@ -129,6 +132,28 @@ public class ClassFileSourceImpl implements ClassFileSource2 {
         } finally {
             if (zipFile != null) zipFile.close();
         }
+    }
+
+    private boolean hasExactPathCase(File file) {
+        Path absolute = file.toPath().toAbsolutePath().normalize();
+        Path current = absolute.getRoot();
+        if (current == null) return false;
+        for (Path component : absolute) {
+            boolean found = false;
+            try (DirectoryStream<Path> children = Files.newDirectoryStream(current)) {
+                for (Path child : children) {
+                    if (child.getFileName().toString().equals(component.toString())) {
+                        found = true;
+                        break;
+                    }
+                }
+            } catch (IOException e) {
+                return false;
+            }
+            if (!found) return false;
+            current = current.resolve(component);
+        }
+        return Files.isRegularFile(current);
     }
 
     /*

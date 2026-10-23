@@ -17,7 +17,7 @@ public class UnstructuredGoto extends AbstractUnStructuredStatement {
 
     @Override
     public Dumper dump(Dumper dumper) {
-        return dumper.print("** GOTO " + getContainer().getTargetLabel(0)).newln();
+        return dumper.print("; /* CFR unstructured goto: " + getContainer().getTargetLabel(0) + " */").newln();
     }
 
     @Override

@@ -106,8 +106,12 @@ public class StructuredTry extends AbstractStructuredStatement {
         return true;
     }
 
-    void addCatch(Op04StructuredStatement catchStatement) {
+    public void addCatch(Op04StructuredStatement catchStatement) {
         catchBlocks.add(catchStatement);
+    }
+
+    public boolean hasCatchOrFinally() {
+        return !catchBlocks.isEmpty() || finallyBlock != null;
     }
 
     public void setFinally(Op04StructuredStatement finallyBlock) {

@@ -29,13 +29,7 @@ public class UnstructuredWhile extends AbstractUnStructuredStatement {
 
     @Override
     public Dumper dump(Dumper dumper) {
-        dumper.print("** while (");
-        if (condition == null) {
-            dumper.print("true");
-        } else {
-            dumper.dump(condition);
-        }
-        return dumper.separator(")").newln();
+        return dumper.print("; /* CFR unstructured loop */").newln();
     }
 
     @Override

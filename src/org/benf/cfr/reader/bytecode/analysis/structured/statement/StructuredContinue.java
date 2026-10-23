@@ -9,6 +9,7 @@ import org.benf.cfr.reader.bytecode.analysis.structured.StructuredStatement;
 import org.benf.cfr.reader.bytecode.analysis.opgraph.op4rewriters.transformers.StructuredStatementTransformer;
 import org.benf.cfr.reader.state.TypeUsageCollector;
 import org.benf.cfr.reader.util.output.Dumper;
+import org.benf.cfr.reader.util.output.BlockReferenceContext;
 
 import java.util.List;
 
@@ -25,7 +26,7 @@ public class StructuredContinue extends AbstractStructuredContinue {
 
     @Override
     public Dumper dump(Dumper dumper) {
-        if (localContinue) {
+        if (localContinue || !BlockReferenceContext.isValidContinueTarget(continueTgt)) {
             dumper.keyword("continue").print(";");
         } else {
             dumper.keyword("continue ").print(continueTgt.getName() + ";");
@@ -46,6 +47,10 @@ public class StructuredContinue extends AbstractStructuredContinue {
     @Override
     public BlockIdentifier getContinueTgt() {
         return continueTgt;
+    }
+
+    public boolean isLocalContinue() {
+        return localContinue;
     }
 
     @Override

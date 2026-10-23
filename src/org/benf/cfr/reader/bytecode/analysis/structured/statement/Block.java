@@ -21,6 +21,7 @@ import org.benf.cfr.reader.util.collections.ListFactory;
 import org.benf.cfr.reader.util.Optional;
 import org.benf.cfr.reader.util.collections.SetFactory;
 import org.benf.cfr.reader.util.output.Dumper;
+import org.benf.cfr.reader.util.output.BlockReferenceContext;
 
 import java.util.*;
 
@@ -478,6 +479,10 @@ public class Block extends AbstractStructuredStatement {
         return containedStatements;
     }
 
+    public BlockIdentifier getBlockIdentifier() {
+        return blockIdentifier;
+    }
+
     public void replaceBlockStatements(Collection<Op04StructuredStatement> statements) {
         containedStatements.clear();
         containedStatements.addAll(statements);
@@ -528,7 +533,7 @@ public class Block extends AbstractStructuredStatement {
     private boolean canFoldUp() {
         boolean isIndenting = isIndenting();
         if (blockIdentifier != null) {
-            if (blockIdentifier.hasForeignReferences()) {
+            if (blockIdentifier.hasForeignReferences() || BlockReferenceContext.isReferenced(blockIdentifier)) {
                 isIndenting = true;
             } else {
                 isIndenting = false;
@@ -541,7 +546,7 @@ public class Block extends AbstractStructuredStatement {
     public Dumper dump(Dumper d) {
         boolean isIndenting = isIndenting();
         if (blockIdentifier != null) {
-            if (blockIdentifier.hasForeignReferences()) {
+            if (blockIdentifier.hasForeignReferences() || BlockReferenceContext.isReferenced(blockIdentifier)) {
                 d.label(blockIdentifier.getName(), true);
                 isIndenting = true;
             } else {
@@ -560,8 +565,94 @@ public class Block extends AbstractStructuredStatement {
                 d.separator("{").newln();
                 d.indent(1);
             }
-            for (Op04StructuredStatement structuredBlock : containedStatements) {
+            // If this block contains case labels, it's a switch body - don't wrap anything
+            // (case/default labels must remain direct children of the switch)
+            boolean isSwitchBody = false;
+            for (Op04StructuredStatement s : containedStatements) {
+                if (s.getStatement() instanceof StructuredCase) {
+                    isSwitchBody = true;
+                    break;
+                }
+            }
+            boolean wrappedUnreachable = false;
+
+            for (int idx = 0; idx < containedStatements.size(); idx++) {
+                Op04StructuredStatement structuredBlock = containedStatements.get(idx);
+                StructuredStatement stm = structuredBlock.getStatement();
+                boolean isCaseLabel = stm instanceof StructuredCase;
+                boolean isComment = stm instanceof StructuredComment;
+                boolean isTerminator = isNonFallingTerminator(stm);
+
+                // Previous statement determines if we're entering unreachable territory
+                boolean prevIsTerminator = false;
+                if (idx > 0) {
+                    StructuredStatement prev = containedStatements.get(idx - 1).getStatement();
+                    boolean prevDirectTerm = isNonFallingTerminator(prev);
+                    boolean prevIsBlock = prev instanceof Block;
+                    boolean prevBlockTerm = prevIsBlock && ((Block) prev).endsWithTerminator();
+                    boolean prevSwitchTerm = prev instanceof StructuredSwitch
+                            && switchMayNotCompleteNormally((StructuredSwitch) prev);
+                    prevIsTerminator = prevDirectTerm || prevBlockTerm || prevSwitchTerm;
+                }
+
+                // Close wrapper before case labels so they remain direct switch children
+                if (wrappedUnreachable && isCaseLabel) {
+                    d.indent(-1);
+                    d.separator("}");
+                    d.newln();
+                    wrappedUnreachable = false;
+                }
+
+                // Handle terminators that need their own if(false) wrapper:
+                // When inside a wrapper, a terminator followed by more code must be
+                // wrapped separately so code after it is "reachable" to javac.
+                if (!isSwitchBody && wrappedUnreachable && isTerminator && !isCaseLabel
+                        && hasReachableStatementsAfter(idx)) {
+                    // Close current wrapper, dump terminator in its own if(false), reopen
+                    d.indent(-1);
+                    d.separator("}");
+                    d.newln();
+                    d.print("if (false) {").newln();
+                    d.indent(1);
+                    structuredBlock.dump(d);
+                    d.indent(-1);
+                    d.separator("}");
+                    d.newln();
+                    d.print("if (false) {").newln();
+                    d.indent(1);
+                    // wrappedUnreachable stays true - we're still in unreachable region
+                    continue;
+                }
+
+                // Enter outer wrapper if needed
+                boolean enterUnreachable = prevIsTerminator && !isCaseLabel;
+                boolean terminatorNeedsWrapper = isTerminator && !isSwitchBody && !isCaseLabel
+                        && hasReachableStatementsAfter(idx);
+                boolean shouldWrap = !isSwitchBody && (enterUnreachable || terminatorNeedsWrapper);
+
+                if (shouldWrap && !wrappedUnreachable && !isCaseLabel) {
+                    d.print("if (false) {").newln();
+                    d.indent(1);
+                    wrappedUnreachable = true;
+                    // If this statement is a terminator that starts the wrapper,
+                    // wrap it in its own nested if(false) so subsequent code is reachable
+                    if (isTerminator && hasReachableStatementsAfter(idx)) {
+                        d.print("if (false) {").newln();
+                        d.indent(1);
+                        structuredBlock.dump(d);
+                        d.indent(-1);
+                        d.separator("}");
+                        d.newln();
+                        // Stay in outer wrapper for subsequent statements
+                        continue;
+                    }
+                }
                 structuredBlock.dump(d);
+            }
+            if (wrappedUnreachable) {
+                d.indent(-1);
+                d.separator("}");
+                d.newln();
             }
         } finally {
             if (isIndenting) {
@@ -573,8 +664,149 @@ public class Block extends AbstractStructuredStatement {
         return d;
     }
 
+    private static boolean isNonFallingTerminator(StructuredStatement stm) {
+        return stm instanceof StructuredReturn
+                || stm instanceof StructuredThrow
+                || stm instanceof StructuredBreak
+                || stm instanceof StructuredContinue;
+    }
+
+    /**
+     * Returns true if there are any statements after idx that are not comments and not case labels.
+     * Used to determine if a terminator should be wrapped in if(false) - only if there's
+     * unreachable code following it.
+     */
+    private boolean hasReachableStatementsAfter(int idx) {
+        for (int i = idx + 1; i < containedStatements.size(); i++) {
+            StructuredStatement stm = containedStatements.get(i).getStatement();
+            if (stm instanceof StructuredComment) continue;
+            if (stm instanceof StructuredCase) continue;
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Returns true if a switch may NOT complete normally (all paths terminate).
+     * Simplified check: has default case AND last case body ends with terminator.
+     */
+    private static boolean switchMayNotCompleteNormally(StructuredSwitch switchStatement) {
+        StructuredStatement body = switchStatement.getBody().getStatement();
+        if (!(body instanceof Block)) return false;
+        Block switchBody = (Block) body;
+
+        boolean hasDefault = false;
+        StructuredCase lastCase = null;
+        // Also check for statements after last case (unreachable code in switch body)
+        boolean hasStatementsAfterLastCase = false;
+
+        List<Op04StructuredStatement> stmts = switchBody.getBlockStatements();
+        for (Op04StructuredStatement s : stmts) {
+            StructuredStatement stm = s.getStatement();
+            if (stm instanceof StructuredCase) {
+                StructuredCase cs = (StructuredCase) stm;
+                if (cs.isDefault()) hasDefault = true;
+                lastCase = cs;
+                hasStatementsAfterLastCase = false;
+            } else if (!(stm instanceof StructuredComment)) {
+                hasStatementsAfterLastCase = true;
+            }
+        }
+
+        // If there are statements after the last case (like orphaned break),
+        // those are part of the last case via fall-through.
+        // For switch to not complete normally, last case must terminate.
+        if (!hasDefault) return false;
+        if (lastCase == null) return false;
+
+        // Check if last case body ends with terminator
+        StructuredStatement caseBody = lastCase.getBody().getStatement();
+        boolean result;
+        if (caseBody instanceof Block) {
+            Block caseBlock = (Block) caseBody;
+            result = caseBlock.endsWithTerminator();
+            // Also check if case ends with an infinite while(true) without break
+            if (!result && !caseBlock.getBlockStatements().isEmpty()) {
+                StructuredStatement lastStm = caseBlock.getBlockStatements()
+                        .get(caseBlock.getBlockStatements().size() - 1).getStatement();
+                if (lastStm instanceof StructuredWhile) {
+                    StructuredWhile whileStm = (StructuredWhile) lastStm;
+                    if (whileStm.getCondition() == null) {
+                        // while(true) - check if body has local break
+                        result = !blockContainsLocalBreak(whileStm.getBody().getStatement());
+                    }
+                }
+            }
+        } else {
+            result = isNonFallingTerminator(caseBody);
+            if (!result && caseBody instanceof StructuredWhile) {
+                StructuredWhile whileStm = (StructuredWhile) caseBody;
+                if (whileStm.getCondition() == null) {
+                    result = !blockContainsLocalBreak(whileStm.getBody().getStatement());
+                }
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Returns true if the statement (expected to be a Block or single statement) contains
+     * an unlabeled break that would exit an enclosing loop/switch.
+     */
+    private static boolean blockContainsLocalBreak(StructuredStatement stm) {
+        if (stm instanceof StructuredBreak) {
+            return ((StructuredBreak) stm).isLocalBreak();
+        }
+        if (stm instanceof Block) {
+            for (Op04StructuredStatement s : ((Block) stm).getBlockStatements()) {
+                if (blockContainsLocalBreak(s.getStatement())) return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Returns true if this block contains an unconditional terminator (return/break/continue/throw)
+     * at its top level (not nested inside if/loop/switch). After such a terminator,
+     * subsequent statements at this level are unreachable.
+     */
+    public boolean endsWithTerminator() {
+        if (containedStatements.isEmpty()) return false;
+        // Look for ANY unconditional terminator at this block's level.
+        // If found, everything after it is unreachable, and the block effectively "ends" with terminator.
+        for (int i = 0; i < containedStatements.size(); i++) {
+            StructuredStatement stm = containedStatements.get(i).getStatement();
+            if (stm instanceof StructuredComment) continue;
+            if (isNonFallingTerminator(stm)) {
+                // Check if there are any non-comment statements after this terminator
+                boolean hasAfter = false;
+                for (int j = i + 1; j < containedStatements.size(); j++) {
+                    StructuredStatement after = containedStatements.get(j).getStatement();
+                    if (!(after instanceof StructuredComment)) {
+                        hasAfter = true;
+                        break;
+                    }
+                }
+                // If terminator is not last, this block has unreachable code after terminator
+                // Return true so parent knows code after this block is also unreachable
+                if (hasAfter) return true;
+                // Terminator is last statement - block ends with terminator
+                return true;
+            }
+            // Nested block that contains a terminator at its level
+            if (stm instanceof Block && ((Block) stm).endsWithTerminator()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public boolean isIndenting() {
         return indenting;
+    }
+
+    public boolean hasForeignReferences() {
+        return blockIdentifier != null && blockIdentifier.hasForeignReferences();
     }
 
     public void setIndenting(boolean indenting) {

@@ -85,6 +85,12 @@ public class StructuredCase extends AbstractStructuredBlockStatement {
 
     @Override
     public Dumper dump(Dumper dumper) {
+        dumpHeader(dumper);
+        getBody().dump(dumper);
+        return dumper;
+    }
+
+    public Dumper dumpHeader(Dumper dumper) {
         if (isDefault()) {
             if (handlesNull) {
                 dumper.keyword("case ").keyword("null").separator(", ");
@@ -107,7 +113,6 @@ public class StructuredCase extends AbstractStructuredBlockStatement {
                 if (x != last) dumper.newln();
             }
         }
-        getBody().dump(dumper);
         return dumper;
     }
 

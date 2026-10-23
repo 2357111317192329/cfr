@@ -11,6 +11,7 @@ import org.benf.cfr.reader.bytecode.analysis.parse.utils.Pair;
 import org.benf.cfr.reader.bytecode.analysis.parse.utils.QuotingUtils;
 import org.benf.cfr.reader.bytecode.analysis.parse.wildcard.WildcardMatch;
 import org.benf.cfr.reader.bytecode.analysis.structured.StructuredStatement;
+import org.benf.cfr.reader.bytecode.analysis.structured.StructuredScope;
 import org.benf.cfr.reader.bytecode.analysis.structured.statement.Block;
 import org.benf.cfr.reader.bytecode.analysis.structured.statement.StructuredAssignment;
 import org.benf.cfr.reader.bytecode.analysis.structured.statement.StructuredComment;
@@ -79,7 +80,8 @@ public class EnumClassRewriter {
      */
     private void removeAllRemainingSupers() {
         List<Method> constructors = classFile.getConstructors();
-        EnumAllSuperRewriter enumSuperRewriter = new EnumAllSuperRewriter();
+        boolean directEnum = classFile.testAccessFlag(AccessFlag.ACC_ENUM) && TypeConstants.ENUM.equals(classFile.getBaseClassType());
+        Op04Rewriter enumSuperRewriter = directEnum ? new EnumSuperRewriter() : new EnumAllSuperRewriter();
         for (Method constructor : constructors) {
             enumSuperRewriter.rewrite(constructor.getAnalysis());
         }
@@ -102,7 +104,6 @@ public class EnumClassRewriter {
         }
 
         Op04StructuredStatement staticInitCode = staticInit.getAnalysis();
-        if (!staticInitCode.isFullyStructured()) return false;
         EnumInitMatchCollector initMatchCollector = analyseStaticMethod(staticInitCode);
         if (initMatchCollector == null) return false;
 
@@ -113,12 +114,16 @@ public class EnumClassRewriter {
         Method values;
         try {
             valueOf = classFile.getMethodByName("valueOf").get(0);
-            values = classFile.getMethodByName("values").get(0);
+            valueOf.hideSynthetic();
         } catch (NoSuchMethodException e) {
-            return false;
+            valueOf = null;
         }
-        valueOf.hideSynthetic();
-        values.hideSynthetic();
+        try {
+            values = classFile.getMethodByName("values").get(0);
+            values.hideSynthetic();
+        } catch (NoSuchMethodException e) {
+            values = null;
+        }
         for (ClassFileField field : initMatchCollector.getMatchedHideTheseFields()) {
             field.markHidden();
         }
@@ -146,10 +151,16 @@ public class EnumClassRewriter {
             enumSuperRewriter.rewrite(constructor.getAnalysis());
         }
 
-        List<Pair<StaticVariable, AbstractConstructorInvokation>> entries = ListFactory.newList();
-        for (Map.Entry<StaticVariable, MatchedEnumEntry> entry : entryMap.entrySet()) {
-            entries.add(Pair.<StaticVariable, AbstractConstructorInvokation>make(entry.getKey(), entry.getValue().getData()));
+        List<Pair<StaticVariable, Expression>> entries = ListFactory.newList();
+        for (Expression value : matchedArray.getElementExpressions()) {
+            if (!(value instanceof LValueExpression)) continue;
+            LValue lvalue = ((LValueExpression)value).getLValue();
+            if (!(lvalue instanceof StaticVariable)) continue;
+            StaticVariable enumField = (StaticVariable)lvalue;
+            MatchedEnumEntry entry = entryMap.get(enumField);
+            if (entry != null) entries.add(Pair.<StaticVariable, Expression>make(enumField, entry.getData()));
         }
+        hideSyntheticEnumSubclassFactories(classFile);
         classFile.setDumpHelper(new ClassFileDumperEnum(state, entries));
 
         /*
@@ -169,9 +180,10 @@ public class EnumClassRewriter {
 
             List<Pair<StaticVariable, String>> renames = ListFactory.newList();
 
-            for (Pair<StaticVariable, AbstractConstructorInvokation> entry : entries) {
+            for (Pair<StaticVariable, Expression> entry : entries) {
                 StaticVariable sv = entry.getFirst();
-                AbstractConstructorInvokation aci = entry.getSecond();
+                if (!(entry.getSecond() instanceof AbstractConstructorInvokation)) continue;
+                AbstractConstructorInvokation aci = (AbstractConstructorInvokation) entry.getSecond();
                 String name = sv.getFieldName();
 
                 /*
@@ -211,11 +223,30 @@ public class EnumClassRewriter {
         return true;
     }
 
+    private void hideSyntheticEnumSubclassFactories(ClassFile enumClass) {
+        for (Method method : enumClass.getMethods()) {
+            if (!method.testAccessFlag(AccessFlagMethod.ACC_STATIC) ||
+                    !method.testAccessFlag(AccessFlagMethod.ACC_BRIDGE) ||
+                    !method.testAccessFlag(AccessFlagMethod.ACC_SYNTHETIC)) continue;
+            JavaTypeInstance returnType = method.getMethodPrototype().getReturnType();
+            if (classType.equals(returnType)) continue;
+            try {
+                ClassFile concreteClass = state.getClassFile(returnType.getDeGenerifiedType());
+                if (concreteClass.getBindingSupers().containsBase(classType)) method.hideSynthetic();
+            } catch (CannotLoadClassException ignored) {
+                // Keep the bridge visible when its return type cannot be resolved as an enum subclass.
+            }
+        }
+    }
+
     /*
      * Expect the static initialiser to be in a fairly common format - i.e. we will
      * NOT attempt to deal with obfuscation.
      */
     private EnumInitMatchCollector analyseStaticMethod(Op04StructuredStatement statement) {
+        if (!statement.isFullyStructured()) {
+            return analyseStaticMethodWithUnstructuredBlocks(statement);
+        }
         List<StructuredStatement> statements = ListFactory.newList();
         statement.linearizeStatementsInto(statements);
 
@@ -237,13 +268,14 @@ public class EnumClassRewriter {
                 new KleeneStar(
                         new MatchOneOf(
                                 new ResetAfterTest(wcm, new CollectMatch("entry", new StructuredAssignment(BytecodeLoc.NONE, wcm.getStaticVariable("e", classType, clazzIJT), wcm.getConstructorSimpleWildcard("c", classType)))),
-                                new ResetAfterTest(wcm, new CollectMatch("entryderived", new StructuredAssignment(BytecodeLoc.NONE, wcm.getStaticVariable("e2", classType, clazzIJT, false), wcm.getConstructorAnonymousWildcard("c2", null))))
+                                new ResetAfterTest(wcm, new CollectMatch("entryderived", new StructuredAssignment(BytecodeLoc.NONE, wcm.getStaticVariable("e2", classType, clazzIJT, false), wcm.getConstructorAnonymousWildcard("c2", null)))),
+                                new ResetAfterTest(wcm, new CollectMatch("entrydynamic", new StructuredAssignment(BytecodeLoc.NONE, wcm.getStaticVariable("e3", classType, clazzIJT), wcm.getExpressionWildCard("indy"))))
                         )
                 ),
                 new MatchOneOf(
-                    new ResetAfterTest(wcm, new CollectMatch("values", new StructuredAssignment(BytecodeLoc.NONE, wcm.getStaticVariable("v", classType, clazzAIJT), wcm.getNewArrayWildCard("v", 0, 1)))),
-                    new ResetAfterTest(wcm, new CollectMatch("values15", new StructuredAssignment(BytecodeLoc.NONE, wcm.getStaticVariable("v", classType, clazzAIJT), wcm.getStaticFunction("v", this.classType, new JavaArrayTypeInstance(1, this.classType), "$values")))),
-                    new ResetAfterTest(wcm, new CollectMatch("noValues", new StructuredAssignment(BytecodeLoc.NONE, wcm.getStaticVariable("v", classType, clazzAIJT), new NewObjectArray(BytecodeLoc.NONE, Collections.<Expression>singletonList(Literal.INT_ZERO), arrayType))))
+                                new ResetAfterTest(wcm, new CollectMatch("values", new StructuredAssignment(BytecodeLoc.NONE, wcm.getStaticVariable("v", classType, clazzAIJT), wcm.getNewArrayWildCard("v", 0, 1)))),
+                                new ResetAfterTest(wcm, new CollectMatch("values15", new StructuredAssignment(BytecodeLoc.NONE, wcm.getStaticVariable("v", classType, clazzAIJT), wcm.getStaticFunction("v", this.classType, new JavaArrayTypeInstance(1, this.classType), "$values")))),
+                                new ResetAfterTest(wcm, new CollectMatch("noValues", new StructuredAssignment(BytecodeLoc.NONE, wcm.getStaticVariable("v", classType, clazzAIJT), new NewObjectArray(BytecodeLoc.NONE, Collections.<Expression>singletonList(Literal.INT_ZERO), arrayType))))
                 )
         );
 
@@ -252,18 +284,64 @@ public class EnumClassRewriter {
 
         mi.advance();
         if (!matcher.match(mi, matchCollector)) {
-            return null;
+            return analyseStaticMethodWithUnstructuredBlocks(statement);
         }
 
-        if (!matchCollector.isValid()) return null;
+        if (!matchCollector.isValid()) return analyseStaticMethodWithUnstructuredBlocks(statement);
         return matchCollector;
+    }
+
+    private EnumInitMatchCollector analyseStaticMethodWithUnstructuredBlocks(Op04StructuredStatement root) {
+        final EnumInitMatchCollector collector = new EnumInitMatchCollector(new WildcardMatch());
+        root.transform(new org.benf.cfr.reader.bytecode.analysis.opgraph.op4rewriters.transformers.StructuredStatementTransformer() {
+            @Override
+            public StructuredStatement transform(StructuredStatement statement, StructuredScope scope) {
+                if (statement instanceof StructuredAssignment) {
+                    collectUnstructuredEnumInitializer((StructuredAssignment)statement, collector);
+                }
+                statement.transformStructuredChildren(this, scope);
+                return statement;
+            }
+        }, new StructuredScope());
+        return collector.isValid() ? collector : null;
+    }
+
+    private void collectUnstructuredEnumInitializer(StructuredAssignment assignment, EnumInitMatchCollector collector) {
+        if (!(assignment.getLvalue() instanceof StaticVariable)) return;
+        StaticVariable target = (StaticVariable)assignment.getLvalue();
+        JavaTypeInstance targetType = target.getInferredJavaType().getJavaTypeInstance();
+        if (isEnumConstantField(target.getFieldName())) {
+            StaticVariable canonicalTarget = new StaticVariable(clazzIJT, classType, target.getFieldName());
+            collector.entryMap.put(canonicalTarget, new MatchedEnumEntry(assignment.getContainer(), assignment.getRvalue()));
+            return;
+        }
+        if (!(targetType instanceof JavaArrayTypeInstance) || !classType.equals(targetType.getArrayStrippedType())) return;
+        Expression value = assignment.getRvalue();
+        if (value instanceof NewAnonymousArray) {
+            collector.matchedArray = new MatchedArrayData(assignment.getContainer(), null, ((NewAnonymousArray)value).getValues());
+        } else if (value instanceof NewObjectArray && ((NewObjectArray)value).getNumDims() == 1 && ((NewObjectArray)value).getDimSize(0).equals(Literal.INT_ZERO)) {
+            collector.matchedArray = new MatchedArrayData(assignment.getContainer(), null, Collections.<Expression>emptyList());
+        } else if (value instanceof StaticFunctionInvokation && targetType instanceof JavaArrayTypeInstance && classType.equals(targetType.getArrayStrippedType())) {
+            collector.matchedArray = getJava15Values(assignment.getContainer(), ((StaticFunctionInvokation)value).getMethodPrototype());
+        }
+    }
+
+    private boolean isEnumConstantField(String fieldName) {
+        for (ClassFileField classFileField : classFile.getFields()) {
+            Field field = classFileField.getField();
+            if (field.getFieldName().equals(fieldName) && field.testAccessFlag(AccessFlag.ACC_STATIC) &&
+                    field.testAccessFlag(AccessFlag.ACC_ENUM) && classType.equals(field.getJavaTypeInstance())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static class MatchedEnumEntry {
         private final Op04StructuredStatement container;
-        private final AbstractConstructorInvokation data;
+        private final Expression data;
 
-        private MatchedEnumEntry(Op04StructuredStatement container, AbstractConstructorInvokation data) {
+        private MatchedEnumEntry(Op04StructuredStatement container, Expression data) {
             this.container = container;
             this.data = data;
         }
@@ -272,7 +350,7 @@ public class EnumClassRewriter {
             return container;
         }
 
-        private AbstractConstructorInvokation getData() {
+        private Expression getData() {
             return data;
         }
     }
@@ -325,6 +403,13 @@ public class EnumClassRewriter {
                 StaticVariable staticVariable = wcm.getStaticVariable("e2").getMatch();
                 ConstructorInvokationAnonymousInner constructorInvokation = wcm.getConstructorAnonymousWildcard("c2").getMatch();
                 entryMap.put(staticVariable, new MatchedEnumEntry(statement.getContainer(), constructorInvokation));
+                return;
+            }
+
+            if (name.equals("entrydynamic")) {
+                StaticVariable staticVariable = wcm.getStaticVariable("e3").getMatch();
+                Expression initializer = wcm.getExpressionWildCard("indy").getMatch();
+                entryMap.put(staticVariable, new MatchedEnumEntry(statement.getContainer(), initializer));
                 return;
             }
 

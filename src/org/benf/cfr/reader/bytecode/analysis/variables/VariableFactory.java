@@ -13,6 +13,7 @@ import org.benf.cfr.reader.util.collections.MapFactory;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.Collection;
 
 public class VariableFactory {
     private final VariableNamer variableNamer;
@@ -33,6 +34,10 @@ public class VariableFactory {
         if (methodPrototype.isInstanceMethod()) {
             JavaTypeInstance thisType = method.getClassFile().getClassType();
             typedArgs.put(offset++, new InferredJavaType(thisType, InferredJavaType.Source.UNKNOWN, true));
+        }
+        if (method.getConstructorFlag().isEnumConstructor() && methodPrototype.hasRemovedEnumConstructorArgs()) {
+            typedArgs.put(offset++, new InferredJavaType(org.benf.cfr.reader.bytecode.analysis.types.TypeConstants.STRING, InferredJavaType.Source.UNKNOWN, true));
+            typedArgs.put(offset++, new InferredJavaType(RawJavaType.INT, InferredJavaType.Source.UNKNOWN, true));
         }
         for (JavaTypeInstance arg : args) {
             typedArgs.put(offset, new InferredJavaType(arg, InferredJavaType.Source.UNKNOWN, true));
@@ -57,7 +62,9 @@ public class VariableFactory {
     }
 
     public LValue tempVariable(InferredJavaType type) {
-        return new LocalVariable("cfr_temp_" + ignored++, type);
+        LocalVariable res = new LocalVariable("cfr_temp_" + ignored++, type);
+        cache.put(res, res);
+        return res;
     }
 
     /*
@@ -69,7 +76,7 @@ public class VariableFactory {
             // however, we can recover from here.
             ident = new Ident(stackPosition, -1);
         }
-        InferredJavaType varType = ident.getIdx() == 0 ? typedArgs.get(stackPosition) : null;
+        InferredJavaType varType = ident.getIdx() == 0 || (method.getConstructorFlag().isEnumConstructor() && methodPrototypeHasRemovedEnumArgs() && stackPosition <= (method.getMethodPrototype().isInstanceMethod() ? 2 : 1)) ? typedArgs.get(stackPosition) : null;
         if (varType == null) {
             varType = new InferredJavaType(RawJavaType.VOID, InferredJavaType.Source.UNKNOWN);
         }
@@ -88,7 +95,19 @@ public class VariableFactory {
         return val;
     }
 
+    private boolean methodPrototypeHasRemovedEnumArgs() {
+        return method.getMethodPrototype().hasRemovedEnumConstructorArgs();
+    }
+
     public void mutatingRenameUnClash(LocalVariable toRename) {
         variableNamer.mutatingRenameUnClash(toRename.getName());
+    }
+
+    public Collection<LValue> getCreatedVariables() {
+        return cache.values();
+    }
+
+    public void registerVariable(LValue variable) {
+        cache.put(variable, variable);
     }
 }

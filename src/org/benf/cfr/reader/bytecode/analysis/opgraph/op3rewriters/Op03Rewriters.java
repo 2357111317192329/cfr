@@ -133,8 +133,8 @@ public class Op03Rewriters {
         AssertionJumps.extractAssertionJumps(op03SimpleParseNodes);
     }
 
-    public static void replaceStackVarsWithLocals(List<Op03SimpleStatement> op03SimpleParseNodes) {
-        rewriteWith(op03SimpleParseNodes, new StackVarToLocalRewriter());
+    public static void replaceStackVarsWithLocals(List<Op03SimpleStatement> op03SimpleParseNodes, VariableFactory variableFactory) {
+        rewriteWith(op03SimpleParseNodes, new StackVarToLocalRewriter(variableFactory));
     }
 
     public static void narrowAssignmentTypes(Method method, List<Op03SimpleStatement> statements) {

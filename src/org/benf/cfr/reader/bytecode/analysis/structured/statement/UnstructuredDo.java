@@ -29,7 +29,7 @@ public class UnstructuredDo extends AbstractUnStructuredStatement {
 
     @Override
     public Dumper dump(Dumper dumper) {
-        return dumper.print("** do ").newln();
+        return dumper.print("; /* CFR unstructured do loop */").newln();
     }
 
     @Override

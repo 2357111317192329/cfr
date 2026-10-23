@@ -20,7 +20,7 @@ public class UnstructuredBreak extends AbstractUnStructuredStatement {
 
     @Override
     public Dumper dump(Dumper dumper) {
-        return dumper.print("** break;").newln();
+        return dumper.print("; /* CFR unstructured break */").newln();
     }
 
     @Override

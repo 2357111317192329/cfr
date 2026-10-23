@@ -42,13 +42,7 @@ public class UnstructuredFor extends AbstractUnStructuredStatement {
 
     @Override
     public Dumper dump(Dumper dumper) {
-        dumper.print("** for (").dump(initial).print("; ").dump(condition).print("; ");
-        boolean first = true;
-        for (AbstractAssignmentExpression assignment : assignments) {
-            first = StringUtils.comma(first, dumper);
-            dumper.dump(assignment);
-        }
-        return dumper.separator(")").newln();
+        return dumper.print("; /* CFR unstructured for loop */").newln();
     }
 
     @Override

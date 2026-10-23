@@ -1051,6 +1051,15 @@ public class ClassFile implements Dumpable, TypeUsageCollectable {
             method.analyse();
         }
 
+        // Un-hide bridge methods that are the sole implementation of an interface method.
+        // Obfuscators mark real methods as ACC_BRIDGE+ACC_SYNTHETIC; hiding them would leave
+        // the class not implementing its interfaces, causing compile errors in decompiled output.
+        try {
+            analyseBridgeHiding();
+        } catch (RuntimeException e) {
+            addComment("Failed to analyse bridge hiding", e);
+        }
+
         try {
             if (options.getOption(OptionsImpl.OVERRIDES, classFileVersion)) {
                 analyseOverrides();
@@ -1061,6 +1070,47 @@ public class ClassFile implements Dumpable, TypeUsageCollectable {
             addComment(DecompilerComment.WHOLE_CLASS_EXCEPTION);
         }
 
+    }
+
+    private void analyseBridgeHiding() {
+        ClassSignature sig = getClassSignature();
+        if (sig == null) return;
+        List<JavaTypeInstance> interfaces = sig.getInterfaces();
+        if (interfaces == null || interfaces.isEmpty()) return;
+
+        for (JavaTypeInstance intf : interfaces) {
+            JavaTypeInstance deGen = intf.getDeGenerifiedType();
+            if (!(deGen instanceof JavaRefTypeInstance)) continue;
+            ClassFile intfFile = constantPool.getDCCommonState().getClassFileOrNull(deGen);
+            if (intfFile == null) continue;
+
+            for (Method intfMethod : intfFile.getMethods()) {
+                MethodPrototype intfProto = intfMethod.getMethodPrototype();
+                // Only care about abstract interface methods (instance, non-static)
+                if (intfMethod.testAccessFlag(AccessFlagMethod.ACC_STATIC)) continue;
+
+                // Does this class have any VISIBLE method implementing this?
+                boolean hasVisible = false;
+                Method hiddenBridgeMatch = null;
+                for (Method method : methods) {
+                    if (method.testAccessFlag(AccessFlagMethod.ACC_STATIC)) continue;
+                    MethodPrototype proto = method.getMethodPrototype();
+                    if (!proto.getName().equals(intfProto.getName())) continue;
+                    if (!proto.equalsMatch(intfProto)) continue;
+                    if (method.hiddenState() == Method.Visibility.Visible) {
+                        hasVisible = true;
+                        break;
+                    }
+                    if (method.hiddenState() == Method.Visibility.HiddenBridge) {
+                        hiddenBridgeMatch = method;
+                    }
+                }
+                // If no visible implementation but we have a hidden bridge, un-hide it
+                if (!hasVisible && hiddenBridgeMatch != null) {
+                    hiddenBridgeMatch.unhideBridge();
+                }
+            }
+        }
     }
 
     public void releaseCode() {

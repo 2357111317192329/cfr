@@ -1,9 +1,9 @@
 package org.benf.cfr.reader.entities.classfilehelpers;
 
 import org.benf.cfr.reader.bytecode.analysis.parse.Expression;
-import org.benf.cfr.reader.bytecode.analysis.parse.expression.AbstractConstructorInvokation;
 import org.benf.cfr.reader.bytecode.analysis.parse.expression.ConstructorInvokationAnonymousInner;
 import org.benf.cfr.reader.bytecode.analysis.parse.expression.ConstructorInvokationSimple;
+import org.benf.cfr.reader.bytecode.analysis.parse.expression.StaticFunctionInvokation;
 import org.benf.cfr.reader.bytecode.analysis.parse.lvalue.StaticVariable;
 import org.benf.cfr.reader.bytecode.analysis.parse.utils.Pair;
 import org.benf.cfr.reader.bytecode.analysis.types.ClassSignature;
@@ -11,7 +11,7 @@ import org.benf.cfr.reader.bytecode.analysis.types.JavaTypeInstance;
 import org.benf.cfr.reader.entities.*;
 import org.benf.cfr.reader.state.DCCommonState;
 import org.benf.cfr.reader.state.TypeUsageCollector;
-import org.benf.cfr.reader.util.MiscUtils;
+import org.benf.cfr.reader.util.CannotLoadClassException;
 import org.benf.cfr.reader.util.output.Dumper;
 
 import java.util.List;
@@ -24,10 +24,12 @@ public class ClassFileDumperEnum extends AbstractClassFileDumper {
             AccessFlag.ACC_PUBLIC, AccessFlag.ACC_PRIVATE, AccessFlag.ACC_PROTECTED, AccessFlag.ACC_STRICT, AccessFlag.ACC_STATIC
     };
 
-    private final List<Pair<StaticVariable, AbstractConstructorInvokation>> entries;
+    private final List<Pair<StaticVariable, Expression>> entries;
+    private final DCCommonState dcCommonState;
 
-    public ClassFileDumperEnum(DCCommonState dcCommonState, List<Pair<StaticVariable, AbstractConstructorInvokation>> entries) {
+    public ClassFileDumperEnum(DCCommonState dcCommonState, List<Pair<StaticVariable, Expression>> entries) {
         super(dcCommonState);
+        this.dcCommonState = dcCommonState;
         this.entries = entries;
     }
 
@@ -48,14 +50,18 @@ public class ClassFileDumperEnum extends AbstractClassFileDumper {
         }
     }
 
-    private static void dumpEntry(Dumper d, Pair<StaticVariable, AbstractConstructorInvokation> entry, boolean last, JavaTypeInstance classType) {
+    private void dumpEntry(Dumper d, Pair<StaticVariable, Expression> entry, boolean last, ClassFile enumClass) {
+        JavaTypeInstance classType = enumClass.getClassType();
         StaticVariable staticVariable = entry.getFirst();
-        AbstractConstructorInvokation constructorInvokation = entry.getSecond();
+        Expression constructorInvokation = entry.getSecond();
         d.fieldName(staticVariable.getFieldName(), classType, false, true, true);
 
-        if (constructorInvokation instanceof ConstructorInvokationSimple) {
-            List<Expression> args = constructorInvokation.getArgs();
-            if (args.size() > 2) {
+        if (constructorInvokation instanceof StaticFunctionInvokation && dumpConstantSpecificClass(d, (StaticFunctionInvokation)constructorInvokation, enumClass)) {
+            // The bridge method returns the enum constant's concrete subclass.
+        } else if (constructorInvokation instanceof ConstructorInvokationSimple) {
+            List<Expression> args = ((ConstructorInvokationSimple)constructorInvokation).getArgs();
+            ConstructorInvokationSimple simple = (ConstructorInvokationSimple) constructorInvokation;
+            if (!dumpConstantSpecificClass(d, simple.getConstructionType(), args, enumClass) && args.size() > 2) {
                 d.separator("(");
                 for (int x = 2, len = args.size(); x < len; ++x) {
                     if (x > 2) d.print(", ");
@@ -65,14 +71,32 @@ public class ClassFileDumperEnum extends AbstractClassFileDumper {
             }
         } else if (constructorInvokation instanceof ConstructorInvokationAnonymousInner) {
             ((ConstructorInvokationAnonymousInner) constructorInvokation).dumpForEnum(d);
-        } else {
-            MiscUtils.handyBreakPoint();
         }
         if (last) {
             d.endCodeln();
         } else {
             d.print(",").newln();
         }
+    }
+
+    private boolean dumpConstantSpecificClass(Dumper d, StaticFunctionInvokation bridge, ClassFile enumClass) {
+        List<Expression> args = bridge.getArgs();
+        return dumpConstantSpecificClass(d, bridge.getMethodPrototype().getReturnType(), args, enumClass);
+    }
+
+    private boolean dumpConstantSpecificClass(Dumper d, JavaTypeInstance concreteType, List<Expression> args, ClassFile enumClass) {
+        JavaTypeInstance enumType = enumClass.getClassType();
+        if (enumType.equals(concreteType)) return false;
+        ClassFile concreteClass;
+        try {
+            concreteClass = dcCommonState.getClassFile(concreteType.getDeGenerifiedType());
+        } catch (CannotLoadClassException e) {
+            return false;
+        }
+        if (!concreteClass.getBindingSupers().containsBase(enumType)) return false;
+        List<Expression> constructorArgs = args.size() >= 2 ? args.subList(2, args.size()) : args;
+        new ClassFileDumperAnonymousInner().dumpWithArgs(concreteClass, null, constructorArgs, true, enumClass, d);
+        return true;
     }
 
     @Override
@@ -92,7 +116,25 @@ public class ClassFileDumperEnum extends AbstractClassFileDumper {
         JavaTypeInstance classType = classFile.getClassType();
 
         for (int x = 0, len = entries.size(); x < len; ++x) {
-            dumpEntry(d, entries.get(x), (x == len - 1), classType);
+            dumpEntry(d, entries.get(x), (x == len - 1), classFile);
+        }
+        if (entries.isEmpty()) {
+            boolean hasVisibleMembers = false;
+            for (ClassFileField field : classFile.getFields()) {
+                if (!field.shouldNotDisplay()) {
+                    hasVisibleMembers = true;
+                    break;
+                }
+            }
+            if (!hasVisibleMembers) {
+                for (Method method : classFile.getMethods()) {
+                    if (method.hiddenState() == Method.Visibility.Visible) {
+                        hasVisibleMembers = true;
+                        break;
+                    }
+                }
+            }
+            if (hasVisibleMembers) d.endCodeln();
         }
 
         d.newln();
@@ -119,7 +161,7 @@ public class ClassFileDumperEnum extends AbstractClassFileDumper {
 
     @Override
     public void collectTypeUsages(TypeUsageCollector collector) {
-        for (Pair<StaticVariable, AbstractConstructorInvokation> entry : entries) {
+        for (Pair<StaticVariable, Expression> entry : entries) {
             collector.collectFrom(entry.getFirst());
             collector.collectFrom(entry.getSecond());
         }

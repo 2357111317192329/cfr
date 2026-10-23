@@ -9,6 +9,7 @@ import org.benf.cfr.reader.bytecode.analysis.parse.utils.SSAIdentifierFactory;
 import org.benf.cfr.reader.bytecode.analysis.types.annotated.JavaAnnotatedTypeInstance;
 import org.benf.cfr.reader.bytecode.analysis.types.discovery.InferredJavaType;
 import org.benf.cfr.reader.bytecode.analysis.variables.Ident;
+import org.benf.cfr.reader.bytecode.analysis.variables.Keywords;
 import org.benf.cfr.reader.bytecode.analysis.variables.Slot;
 import org.benf.cfr.reader.bytecode.analysis.variables.VariableNamer;
 import org.benf.cfr.reader.entities.ClassFile;
@@ -81,6 +82,7 @@ public class MethodPrototype implements TypeUsageCollectable {
     // are nonetheless used by the method body.
     private final List<Slot> syntheticArgs = ListFactory.newList();
     private final List<Slot> syntheticCaptureArgs = ListFactory.newList();
+    private boolean enumConstructorArgsRemoved;
     private List<ParameterLValue> parameterLValues = null;
 //    private static int sid = 0;
 //    private final int id = sid++;
@@ -153,6 +155,7 @@ public class MethodPrototype implements TypeUsageCollectable {
     public void unbreakEnumConstructor() {
         this.args.remove(0);
         this.args.remove(0);
+        this.enumConstructorArgsRemoved = true;
     }
 
     @Override
@@ -380,6 +383,7 @@ public class MethodPrototype implements TypeUsageCollectable {
     @SuppressWarnings("UnusedReturnValue")
     public List<LocalVariable> computeParameters(Method.MethodConstructor constructorFlag, Map<Integer, Ident> slotToIdentMap) {
         if (parameterLValues != null) {
+            ensureUniqueParameterNames();
             return getComputedParameters();
         }
 
@@ -397,6 +401,7 @@ public class MethodPrototype implements TypeUsageCollectable {
 //            parameterLValues.add(new LocalVariable(offset, new Ident(offset, 0), variableNamer, offset, new InferredJavaType(RawJavaType.INT, InferredJavaType.Source.UNKNOWN, true), false));
 //            offset++;
 //            hide(1);
+            if (enumConstructorArgsRemoved) offset += 2;
         } else {
             // TODO : It's not a valid assumption that synthetic args are at the front!
             for (Slot synthetic : syntheticArgs) {
@@ -418,7 +423,19 @@ public class MethodPrototype implements TypeUsageCollectable {
             offset += typeInstance.getStackType().getComputationCategory();
         }
 
+        ensureUniqueParameterNames();
         return getComputedParameters();
+    }
+
+    private void ensureUniqueParameterNames() {
+        Set<String> names = SetFactory.newSet();
+        for (ParameterLValue parameter : parameterLValues) {
+            String name = parameter.localVariable.getName().getStringName();
+            if (!names.add(name)) {
+                variableNamer.mutatingRenameUnClash(parameter.localVariable.getName());
+                names.add(parameter.localVariable.getName().getStringName());
+            }
+        }
     }
 
     public JavaTypeInstance getReturnType() {
@@ -430,7 +447,12 @@ public class MethodPrototype implements TypeUsageCollectable {
     }
 
     public String getFixedName() {
-        return fixedName != null ? fixedName : name;
+        String candidate = fixedName != null ? fixedName : name;
+        return Keywords.isAKeyword(candidate) ? Keywords.getReplacement(candidate) : candidate;
+    }
+
+    public boolean hasRemovedEnumConstructorArgs() {
+        return enumConstructorArgsRemoved;
     }
 
     public boolean hasNameBeenFixed() {
@@ -498,6 +520,19 @@ public class MethodPrototype implements TypeUsageCollectable {
 
     public List<JavaTypeInstance> getArgs() {
         return args;
+    }
+
+    public List<JavaTypeInstance> getInitialLocalTypes() {
+        List<JavaTypeInstance> res = ListFactory.newList();
+        if (instanceMethod) res.add(classFile.getClassType());
+        if (enumConstructorArgsRemoved) {
+            res.add(TypeConstants.STRING);
+            res.add(RawJavaType.INT);
+        }
+        for (Slot synthetic : syntheticArgs) res.add(synthetic.getJavaTypeInstance());
+        res.addAll(args);
+        for (Slot synthetic : syntheticCaptureArgs) res.add(synthetic.getJavaTypeInstance());
+        return res;
     }
 
     public List<JavaTypeInstance> getSignatureBoundArgs() {

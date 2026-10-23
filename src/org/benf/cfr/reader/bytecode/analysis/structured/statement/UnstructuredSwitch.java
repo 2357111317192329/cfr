@@ -26,7 +26,7 @@ public class UnstructuredSwitch extends AbstractUnStructuredStatement {
 
     @Override
     public Dumper dump(Dumper dumper) {
-        return dumper.print("** switch (").dump(switchOn).separator(")").newln();
+        return dumper.print("; /* CFR unstructured switch */").newln();
     }
 
     @Override

@@ -220,6 +220,12 @@ public class Method implements KnowsRawSize, TypeUsageCollectable {
         this.hidden = Visibility.HiddenDeadCode;
     }
 
+    public void unhideBridge() {
+        if (this.hidden == Visibility.HiddenBridge) {
+            this.hidden = Visibility.Visible;
+        }
+    }
+
     public Visibility hiddenState() {
         return hidden;
     }

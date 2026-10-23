@@ -17,6 +17,7 @@ import org.benf.cfr.reader.bytecode.analysis.opgraph.op4rewriters.transformers.S
 import org.benf.cfr.reader.bytecode.analysis.types.JavaTypeInstance;
 import org.benf.cfr.reader.state.TypeUsageCollector;
 import org.benf.cfr.reader.util.output.Dumper;
+import org.benf.cfr.reader.util.output.StaticInitializerContext;
 
 import java.util.List;
 
@@ -55,7 +56,11 @@ public class StructuredReturn extends AbstractStructuredStatement implements Box
     @Override
     public Dumper dump(Dumper dumper) {
         if (value == null) {
-            dumper.keyword("return").print(";");
+            if (StaticInitializerContext.hasExitLabel()) {
+                dumper.keyword("break ").print(StaticInitializerContext.EXIT_LABEL).print(";");
+            } else {
+                dumper.keyword("return").print(";");
+            }
         } else {
             dumper.keyword("return ").dump(value).print(";");
         }

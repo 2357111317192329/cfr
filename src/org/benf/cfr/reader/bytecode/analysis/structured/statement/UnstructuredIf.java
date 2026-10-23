@@ -41,7 +41,7 @@ public class UnstructuredIf extends AbstractUnStructuredStatement {
 
     @Override
     public Dumper dump(Dumper dumper) {
-        dumper.print("** if (").dump(conditionalExpression).print(") goto " + getContainer().getTargetLabel(1)).newln();
+        dumper.print("if (").dump(conditionalExpression).print(") { /* CFR unstructured goto: " + getContainer().getTargetLabel(1) + " */ }").newln();
         if (setIfBlock != null) {
             dumper.dump(setIfBlock);
         }
